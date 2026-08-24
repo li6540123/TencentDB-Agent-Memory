@@ -30,6 +30,19 @@ PACK_PLATFORM=linux/amd64 PACK_TAG=$(date +%Y%m%d)-amd64 ./pack.sh
 2. 同事 CLI 只配 Proxy 地址 + `sk-mem`；未绑定时行为与改前一致（`PROXY_UPSTREAM_API_KEY` 等）。
 3. 修改 MaaS Key 后 Hub 提示生效时间 = `PROXY_MAAS_KEY_CACHE_TTL_MS`（默认 60s）。自建 Hub 镜像时需传入 `VITE_PROXY_MAAS_KEY_CACHE_TTL_MS` 与之一致。
 
+### 存量库迁移（新增表 `meta_user_key_maas_credentials`）
+
+升级 Core 后**重启也会自动建表**；也可在升级前后显式执行：
+
+```bash
+cd deploy/internal-team
+./init-per-sk-mem-maas.sh              # Docker volume 内所有 metadata.db
+./init-per-sk-mem-maas.sh --verify-only
+SQLITE_DB=/path/to/metadata.db ./init-per-sk-mem-maas.sh
+```
+
+MongoDB：`mongosh "$URI" --eval 'const dbName="tdai_metadata_default"' ../../MemoryCore/scripts/db/migrate-per-sk-mem-maas-mongo.js`
+
 ## 测试机操作
 
 ```bash

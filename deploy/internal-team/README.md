@@ -124,3 +124,8 @@ Colima 下 docker build 容器内用 `host.docker.internal:7897`，宿主机 cur
 ## 升级镜像
 
 改 `.env` 里的 image tag → `./backup.sh` → `docker compose --env-file .env pull` → `./up.sh`。
+
+**发给同事（自有部署脚本）时**，除 `pack.sh` 产出的镜像包外，一并提供升级契约：
+
+- [`deploy/upgrades/2026-08-24-per-sk-mem-and-http-git/`](../upgrades/2026-08-24-per-sk-mem-and-http-git/) — `UPGRADE.md` + `env.add.yaml` + `verify.sh`
+- 存量库可选：`./init-per-sk-mem-maas.sh`（幂等，Core 重启也会自动建表）

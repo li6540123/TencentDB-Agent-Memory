@@ -1,0 +1,24 @@
+# 发版时填写实际镜像 tag / commit / 构建时间后随离线包交付
+# 复制为 MANIFEST.yaml 并修改（MANIFEST.yaml 可加入 .gitignore 若含内网 registry）
+
+release: "2026-08-24-per-sk-mem-and-http-git"
+built_at: "" # 例 2026-08-24T19:30:00+08:00
+platform: linux/amd64
+
+git:
+  branch: feat/per-sk-mem-and-http-git
+  commit: "2f96266"
+
+images:
+  memory-core: tdai-local/memory-core:per-sk-mem-and-http-git
+  memory-proxy: tdai-local/memory-proxy:per-sk-mem-and-http-git
+  memory-hub: tdai-local/memory-hub:per-sk-mem-and-http-git
+
+artifacts:
+  - path: dist/tdai-images.tgz
+    description: docker save 离线镜像包
+  - path: deploy/upgrades/2026-08-24-per-sk-mem-and-http-git/
+    description: 升级说明与环境变量契约
+
+upgrade_doc: deploy/upgrades/2026-08-24-per-sk-mem-and-http-git/UPGRADE.md
+env_contract: deploy/upgrades/2026-08-24-per-sk-mem-and-http-git/env.add.yaml
