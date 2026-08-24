@@ -53,15 +53,17 @@ http://<PUBLIC_HOST>:8096/openclaw/default
 
 ## 第一台机器
 
-需要：Docker Compose v2、Python 3、能拉镜像（或事先 `docker load`）。
+需要：Docker Compose v2、Python 3、能拉镜像（或 `./load-images.sh` 导入离线包）。
+
+**先看 [RELEASE.md](./RELEASE.md)**（本目录与当前功能分支同步的变更摘要）。
 
 ```bash
 cd deploy/internal-team
 cp .env.example .env
 # 编辑 .env：两组 LLM、REDIS_PASSWORD、PUBLIC_HOST
-# 本机 Claude 用 127.0.0.1；同事从别的机器连再用局域网 IP。
-# PUBLIC_HOST 会写进注入给客户端的 skill-bridge 地址，留空会变成容器网桥 IP。
-chmod +x up.sh down.sh backup.sh restore.sh
+# 可选：MEMORY_EMBEDDING_*（Qwen3 须 SEND_DIMENSIONS=false）
+# 可选：KNOWLEDGE_*（内网 http Git CodeGraph）
+chmod +x up.sh down.sh backup.sh restore.sh build-local.sh export-images.sh load-images.sh
 ./up.sh --render-only          # 可选：先看 runtime/*.yaml
 ./up.sh
 ```
@@ -111,15 +113,22 @@ docker compose --env-file .env restart          # 或 docker restart tdai-proxy 
 
 有 Docker Hub 时也可以只拷本目录，改 `PUBLIC_HOST` 后 `./up.sh`。同一套记忆不要在两台机同时写。
 
-**本地源码镜像（含 MaaS 改动）：**
+**本地源码镜像（含 MaaS + HTTP Git + sendDimensions 修复）：**
 
 ```bash
-# 默认走 .env 里 BUILD_PROXY_PORT=7897 翻墙（Clash HTTP 代理）
-./build-local.sh          # 只构建
-./up-local.sh             # 构建 + 更新 .env 镜像 tag + 启动
+# Linux 服务器用 amd64（Mac 上必加 PLATFORM）
+PLATFORM=linux/amd64 TAG=20688f9-amd64 ./build-local.sh   # 只构建
+./up-local.sh                                              # 构建 + 写 .env 镜像 tag + 启动
+
+# 导出给内网服务器
+./export-images.sh                                         # → dist/tdai-images-20688f9-amd64.tgz
 ```
 
 Colima 下 docker build 容器内用 `host.docker.internal:7897`，宿主机 curl/buildx 用 `127.0.0.1:7897`。
+
+**CodeGraph 内网 HTTP Git：** Hub 容器需 `KNOWLEDGE_ALLOW_HTTP=1`、`KNOWLEDGE_GIT_TOKEN` 等（见 `.env.example`）。
+
+**记忆向量（hybrid）：** Core 的 `runtime/tdai-gateway.yaml` 由 `MEMORY_EMBEDDING_*` 渲染；Qwen3 必须 `MEMORY_EMBEDDING_SEND_DIMENSIONS=false`。
 
 ## 升级镜像
 

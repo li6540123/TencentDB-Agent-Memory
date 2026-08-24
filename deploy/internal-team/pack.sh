@@ -132,6 +132,8 @@ tar czf "$OUT/tdai-internal-team.tgz" -C "$STAGE" "$(basename "$PWD")"
   done
 } > "$OUT/MANIFEST.txt"
 cp image-tags.env "$OUT/image-tags.env"
+cp ../upgrades/2026-08-24-per-sk-mem-and-http-git/UPGRADE.md "$OUT/UPGRADE.md" 2>/dev/null || true
+cp RELEASE.md "$OUT/RELEASE.md" 2>/dev/null || true
 
 echo
 echo "[ok] 镜像 tag = ${TAG}  platform=${PLATFORM:-local}"

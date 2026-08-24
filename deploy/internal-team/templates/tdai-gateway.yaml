@@ -40,8 +40,7 @@ memory:
     strategy: hybrid
     timeoutMs: 5000
   storeBackend: sqlite
-  embedding:
-    provider: none
+${EMBEDDING_YAML}
 
 skill:
   enabled: true

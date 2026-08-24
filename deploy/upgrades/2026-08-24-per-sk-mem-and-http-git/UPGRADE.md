@@ -1,166 +1,166 @@
-# Upgrade: per-sk-mem MaaS API Key + HTTP Git clone
+# 升级说明：20688f9-amd64（给部署同事）
 
-> **Git:** `feat/per-sk-mem-and-http-git` @ `2f96266`（发版时请改为实际 commit）  
-> **基线:** 官方 `feat/server_team` / v2.0.1-beta.2 一带  
-> **平台:** `linux/amd64`（内网 x86 服务器）
-
-## 变更摘要
-
-| 能力 | 涉及镜像 | 新增 env | DB 变更 |
-|------|----------|----------|---------|
-| 每把 sk-mem 绑定 MaaS API Key | **core + proxy + hub** | `TDAI_MAAS_KEY_SECRET` 等 | +1 表 SQLite/Mongo |
-| 内网 HTTP Git CodeGraph | **hub**（Panel+Knowledge） | `KNOWLEDGE_ALLOW_HTTP` 等 | 无 |
+> **镜像包：** `tdai-images-20688f9-amd64.tgz`  
+> **平台：** `linux/amd64`  
+> **分支：** `feat/per-sk-mem-and-http-git`  
+> **Git：** `1ac6058`（含 sendDimensions 修复）
 
 ---
 
-## 1. 镜像（部署方替换 tag）
+## 一分钟看懂：比官方版多了什么？
 
-见同目录 `MANIFEST.yaml`。示例（本地构建 tag）：
+本次在官方 Memory 三件套基础上，**一共 3 件事**：
 
-```text
-tdai-local/memory-core:per-sk-mem-and-http-git
-tdai-local/memory-proxy:per-sk-mem-and-http-git
-tdai-local/memory-hub:per-sk-mem-and-http-git
-```
+| # | 改了什么（用户能感知） | 要升哪个镜像 | 要配什么 |
+|---|----------------------|-------------|---------|
+| **1** | Hub「API Keys」表多一列 **MaaS API Key**：每把 `sk-mem` 可单独绑公司网关 Key，同事 CLI 仍只配 `sk-mem` | core + proxy + hub | Core 加 `TDAI_MAAS_KEY_SECRET`；Hub 页面里逐行填 MaaS Key |
+| **2** | CodeGraph 支持内网 **`http://` Git 仓库**（自动用 Jenkins 账号拉代码，token 不落盘） | **仅 hub** | Hub 加 `KNOWLEDGE_ALLOW_HTTP=1`、`KNOWLEDGE_GIT_TOKEN` 等 |
+| **3** | **Bug 修复**：L0/L1 写入时向量 embedding 失败（Qwen3 报 matryoshka 400），导致语义搜索只有关键词、没有向量 | **仅 core** | 确保 embedding 配置里 `sendDimensions=false`（与搜索路径一致） |
 
-**最小升级路径：**
-
-- 只用 MaaS Key：升 core + proxy + hub  
-- 只用 HTTP Git：仅升 hub  
-- 两者都要：三件套一起升（推荐）
+**推荐：三件套一起升**（你手里的 `tdai-images-20688f9-amd64.tgz` 已包含全部）。
 
 ---
 
-## 2. 环境变量（合并进自有部署脚本）
-
-完整机器可读清单：`env.add.yaml`。
-
-### 2.1 Memory Core（必填 1 项）
-
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `TDAI_MAAS_KEY_SECRET` | **是** | ≥32 字节随机串；AES 加密 MaaS Key。**仅 Core 容器** |
-
-生成：`openssl rand -base64 32`
-
-> 未配置：Hub 无法保存 MaaS Key；Proxy resolve 视为未绑定，走原有上游 Key。
-
-### 2.2 Memory Proxy（可选，有默认）
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `PROXY_MAAS_KEY_CACHE_TTL_MS` | `60000` | resolve 缓存 TTL（毫秒） |
-| `PROXY_MAAS_KEY_RESOLVE_TIMEOUT_MS` | `1500` | 调 Core resolve 超时 |
-
-还需**已有**变量（非本次新增）：`PROXY_CORE_SERVICE_TOKEN`、Core 地址等。
-
-### 2.3 Memory Hub（MaaS 提示 + HTTP Git）
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `VITE_PROXY_MAAS_KEY_CACHE_TTL_MS` | `60000` | 前端「保存成功」提示；应与 Proxy TTL **一致** |
-| `KNOWLEDGE_ALLOW_HTTP` | 未设=仅 HTTPS | 设为 `1` 允许 `http://` 仓库 |
-| `KNOWLEDGE_GIT_TOKEN` | - | 内网 Git PAT（HTTP Basic） |
-| `KNOWLEDGE_GIT_USERNAME` | `jenkins` | Basic Auth 用户名 |
-| `KNOWLEDGE_SSRF_CHECK` | 默认开启 | 内网 IP 仓库时设 `off` |
-
----
-
-## 3. 数据库变更
-
-### 3.1 新增表（per-sk-mem）
-
-**表名：** `meta_user_key_maas_credentials`（Mongo 同名 collection）
-
-```sql
--- SQLite；幂等
-CREATE TABLE IF NOT EXISTS meta_user_key_maas_credentials (
-  key_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  maas_api_key_ciphertext TEXT NOT NULL,
-  key_hint TEXT,
-  updated_at TEXT NOT NULL,
-  FOREIGN KEY (key_id) REFERENCES meta_user_keys(key_id) ON DELETE CASCADE,
-  FOREIGN KEY (user_id) REFERENCES meta_users(user_id) ON DELETE CASCADE
-);
-```
-
-- **不修改**现有 `meta_users` / `meta_user_keys` 列  
-- **升级 Core 并重启后自动建表**（`createSchema()` / Mongo `ensureIndex`）  
-- 可选离线确认（幂等）：
+## 本次镜像 tag（直接填部署脚本）
 
 ```bash
-# Docker volume
-cd deploy/internal-team && ./init-per-sk-mem-maas.sh
-
-# 单库
-SQLITE_DB=/path/to/metadata.db ./init-per-sk-mem-maas.sh
-
-# Mongo
-mongosh "$URI" --eval 'const dbName="tdai_metadata_default"' \
-  ../../MemoryCore/scripts/db/migrate-per-sk-mem-maas-mongo.js
+MEMORY_CORE_IMAGE=tdai-local/memory-core:20688f9-amd64
+PROXY_IMAGE=tdai-local/memory-proxy:20688f9-amd64
+MEMORY_HUB_IMAGE=tdai-local/memory-hub:20688f9-amd64
 ```
 
-### 3.2 HTTP Git
-
-无 metadata / knowledge DB schema 变更。
-
----
-
-## 4. 推荐升级步骤（给自有脚本编排）
-
-```text
-1. load 新镜像（或 docker pull）
-2. 合并 env.add.yaml → 生成/更新 Secret 或 .env
-3. 【新装 Core】生成并注入 TDAI_MAAS_KEY_SECRET（勿用示例占位符）
-4. （可选）./init-per-sk-mem-maas.sh --verify-only
-5. 滚动重启：core → proxy → hub
-6. 冒烟（见下）
-7. 人工：Hub → API Keys → 每行配置 MaaS API Key
-8. 人工（HTTP Git）：Hub 容器注入 KNOWLEDGE_*，Panel 创建 CodeGraph 测 http:// 仓库
-```
-
----
-
-## 5. 冒烟 / 验证
+服务器导入：
 
 ```bash
-# MaaS Proxy 链路（需 Hub 已配某行 MaaS Key）
-cd deploy/internal-team
-./verify-maas-proxy.sh
-
-# HTTP Git：创建 CodeGraph 后进容器检查 token 未落盘
-# grep 不应出现 token：
-#   cat /data/knowledge/<id>/.git/config | grep url
-```
-
-单测（开发机）：
-
-```bash
-cd MemoryCore && npm test
-cd MemoryProxy && npm test
-cd MemoryKnowledge && pnpm test src/source-fetcher/git-fetcher.test.ts
+gzip -dc tdai-images-20688f9-amd64.tgz | docker load
 ```
 
 ---
 
-## 6. 回滚
+## 功能 1：每把 sk-mem 绑定 MaaS API Key
 
-| 操作 | 影响 |
-|------|------|
-| 换回上一版镜像 | 功能回退；新表可保留（向前兼容） |
-| 去掉 `TDAI_MAAS_KEY_SECRET` | MaaS set 失败；其余不变 |
-| 去掉 `KNOWLEDGE_ALLOW_HTTP` | 再次拒绝 `http://` repo_url |
+### 以前（官方）
+
+- 所有同事共用一个 `PROXY_UPSTREAM_API_KEY`，或各自客户端透传网关 Key
+- Hub 只能管理 `sk-mem`，不能管上游 MaaS Key
+
+### 现在
+
+- Hub → **API Keys** → 每行多一列 **「MaaS API Key」**，可添加/修改/清除
+- 同事 Agent 只配：**Proxy 地址 + `sk-mem-xxx`**
+- 某把 `sk-mem` 绑了 MaaS Key → 走该 Key 调公司网关；没绑 → **和以前完全一样**（共用 Key 或透传）
+
+### 部署要改的（仅新增，旧配置保留）
+
+| 容器 | 新增环境变量 | 必填？ |
+|------|-------------|--------|
+| **memory-core** | `TDAI_MAAS_KEY_SECRET` | **是**（`openssl rand -base64 32`） |
+| **memory-proxy** | `PROXY_MAAS_KEY_CACHE_TTL_MS=60000` | 否（有默认） |
+| **memory-proxy** | `PROXY_MAAS_KEY_RESOLVE_TIMEOUT_MS=1500` | 否（有默认） |
+| **memory-hub** | `VITE_PROXY_MAAS_KEY_CACHE_TTL_MS=60000` | 否（应与 Proxy TTL 一致） |
+
+### 数据库（Core 的 metadata 库）
+
+**新增 1 张表**（不改动任何旧表）：
+
+- 表名：`meta_user_key_maas_credentials`
+- 作用：存每把 `sk-mem` 对应的 **加密后** MaaS Key
+- **升级后重启 Core 会自动建表**，一般不用手工跑 SQL
+- 可选确认：`deploy/internal-team/init-per-sk-mem-maas.sh`
+
+### 上线后人工一步
+
+在 Hub 网页里给需要的 `sk-mem` 行配置 MaaS API Key（**不写进 env**）。
 
 ---
 
-## 7. 发版方打包参考
+## 功能 2：CodeGraph 内网 HTTP Git
 
-```bash
-cd deploy/internal-team
-TAG=per-sk-mem-and-http-git ./build-local.sh
-PACK_PLATFORM=linux/amd64 PACK_TAG=20250824-2f96266 ./pack.sh
-# 交付：dist/tdai-images.tgz + dist/tdai-internal-team.tgz + 本 upgrade 目录
+### 以前（官方）
+
+- CodeGraph 只接受 `https://` 公开仓库
+- 内网 `http://codelab.xxx/...` 会被拒绝
+
+### 现在
+
+- 用户在 Panel 填：`http://codelab.msxf.test/demo/test.git`
+- 服务端用环境变量里的账号 token 临时拉代码，**`.git/config` 里不留 token**
+
+### 部署要改的（Hub 容器）
+
+| 环境变量 | 示例 | 说明 |
+|---------|------|------|
+| `KNOWLEDGE_ALLOW_HTTP` | `1` | 放行 `http://` |
+| `KNOWLEDGE_GIT_TOKEN` | `<PAT>` | Jenkins 等 HTTP Basic 密码 |
+| `KNOWLEDGE_GIT_USERNAME` | `jenkins` | 可选，默认 jenkins |
+| `KNOWLEDGE_SSRF_CHECK` | `off` | 仓库 host 是内网 IP 时需要 |
+
+**无数据库变更。**
+
+---
+
+## 功能 3：Bug 修复 — 记忆向量写入失败（Qwen3）
+
+### 现象（旧镜像如 20260821-amd64）
+
+- 对话能记进 L0/L1，但 **vec0 向量索引一直为空**
+- 搜索只有 FTS 关键词命中，语义相近的问法搜不到
+- 日志：`does not support matryoshka representation` HTTP 400
+
+### 原因
+
+- 搜索路径会读 `embedding.sendDimensions=false`
+- **写入路径漏传该配置**，默认带了 `dimensions: 4096`，Qwen3 拒绝
+
+### 本包已修复
+
+- 镜像 `20688f9-amd64` 的 **core** 已包含修复
+- 请确认 embedding 配置 **`sendDimensions: false`**（Qwen3 / BGE-M3）
+- 修复后 **新写入** 的记忆会有向量；**历史已写入但缺向量的记录不会自动补**
+
+详见：`docs/bugs/2026-08-24-l0-l1-embedding-sendDimensions-store-pool.md`
+
+---
+
+## 部署同事 checklist（按顺序打勾）
+
+```
+[ ] 1. docker load 导入 tdai-images-20688f9-amd64.tgz
+[ ] 2. 三个服务的 image tag 改成 20688f9-amd64（见上文）
+[ ] 3. Core 容器注入 TDAI_MAAS_KEY_SECRET（新随机串，≥32 字节）
+[ ] 4. （若用 MaaS Key）Proxy/Hub 注入 PROXY_MAAS_KEY_* / VITE_PROXY_MAAS_KEY_*
+[ ] 5. （若用 HTTP Git）Hub 注入 KNOWLEDGE_ALLOW_HTTP、KNOWLEDGE_GIT_TOKEN 等
+[ ] 6. 确认 embedding.sendDimensions=false（Core 配置，Qwen3 必开）
+[ ] 7. 滚动重启：core → proxy → hub
+[ ] 8. Hub 网页：API Keys 里给需要的 sk-mem 配 MaaS Key
+[ ] 9. （可选）创建 CodeGraph 测 http:// 仓库；对话后检查 vec0 有候选
 ```
 
-**勿将真实 `TDAI_MAAS_KEY_SECRET` / `KNOWLEDGE_GIT_TOKEN` 写入镜像或 MANIFEST。**
+---
+
+## 没变的部分（不用动）
+
+- `PROXY_UPSTREAM_URL` / `PROXY_UPSTREAM_API_KEY` — 未绑 MaaS 的 sk-mem 仍走这些
+- `MEMORY_LLM_API_KEY` — Hub 记忆抽取 LLM，与 MaaS Key 无关
+- Redis、Panel 端口、Proxy 路由等原有配置
+
+---
+
+## 回滚
+
+换回上一版三件套镜像即可；新表 `meta_user_key_maas_credentials` 可留着，不影响旧版本运行。
+
+---
+
+## 附录：机器可读 env 清单
+
+见同目录 `env.add.yaml`（可用脚本 merge 进自有模板）。
+
+## 附录：相关 Git 提交
+
+| Commit | 内容 |
+|--------|------|
+| `6987279` | per-sk-mem MaaS API Key 功能 |
+| `9054c93` | HTTP Git clone |
+| `20688f9` | sendDimensions 写入路径修复 |
+| `b2686e5` | 本升级说明与迁移脚本 |

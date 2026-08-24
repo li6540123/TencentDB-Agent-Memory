@@ -44,8 +44,42 @@ def env_int(name: str, default: int, minimum: int = 1) -> str:
     return str(n)
 
 
+def render_embedding_block() -> str:
+    """记忆 hybrid 召回用的向量 embedding（可选）。Qwen3/BGE-M3 须 sendDimensions=false。"""
+    enabled = env("MEMORY_EMBEDDING_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        return "  embedding:\n    provider: none"
+
+    provider = env("MEMORY_EMBEDDING_PROVIDER", "openai")
+    base_url = env("MEMORY_EMBEDDING_BASE_URL")
+    api_key = env("MEMORY_EMBEDDING_API_KEY")
+    model = env("MEMORY_EMBEDDING_MODEL")
+    if not base_url or not api_key or not model:
+        raise SystemExit(
+            "[error] MEMORY_EMBEDDING_ENABLED=1 时需设置 "
+            "MEMORY_EMBEDDING_BASE_URL / API_KEY / MODEL"
+        )
+
+    dims = env_int("MEMORY_EMBEDDING_DIMENSIONS", 4096)
+    send_raw = env("MEMORY_EMBEDDING_SEND_DIMENSIONS", "false").lower()
+    send_dimensions = send_raw in ("1", "true", "yes", "on")
+
+    lines = [
+        "  embedding:",
+        "    enabled: true",
+        f"    provider: {yaml_quote(provider)}",
+        f"    baseUrl: {yaml_quote(base_url)}",
+        f"    apiKey: {yaml_quote(api_key)}",
+        f"    model: {yaml_quote(model)}",
+        f"    dimensions: {dims}",
+        f"    sendDimensions: {'true' if send_dimensions else 'false'}",
+    ]
+    return "\n".join(lines)
+
+
 def render_gateway() -> str:
     text = (TPL / "tdai-gateway.yaml").read_text()
+    text = text.replace("${EMBEDDING_YAML}", render_embedding_block())
     replacements = {
         "MEMORY_LLM_BASE_URL": env("MEMORY_LLM_BASE_URL"),
         "MEMORY_LLM_API_KEY": env("MEMORY_LLM_API_KEY"),

@@ -3,8 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-TAG="${TAG:-maas-dev}"
-export TAG
+TAG="${TAG:-20688f9-amd64}"
+PLATFORM="${PLATFORM:-linux/amd64}"
+export TAG PLATFORM
 
 if [[ ! -f .env ]]; then
   echo "[error] 没有 .env。先: cp .env.example .env 并填入 LLM/Redis 等真值。" >&2
@@ -13,7 +14,7 @@ fi
 
 chmod +x ./build-local.sh
 
-echo "[up-local] 构建镜像 tag=$TAG ..."
+echo "[up-local] 构建镜像 tag=$TAG platform=$PLATFORM ..."
 ./build-local.sh
 
 CORE="tdai-local/memory-core:${TAG}"
