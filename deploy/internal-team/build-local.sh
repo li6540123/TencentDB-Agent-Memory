@@ -95,7 +95,8 @@ docker build --platform "$PLATFORM" "${DOCKER_BUILD_PROXY_ARGV[@]}" \
 echo
 
 echo "==> Memory Hub (Panel+Knowledge) → $HUB_IMAGE"
-export DOCKER_BUILDKIT=0
+# BuildKit 才能正确 cross-build（Mac arm64 → linux/amd64）；DOCKER_BUILDKIT=0 会混用 arm 缓存导致失败
+export DOCKER_BUILDKIT=1
 export BUILD_PROXY_PORT HOST_HTTP_PROXY DOCKER_HTTP_PROXY DOCKER_HTTPS_PROXY
 IMAGE_NAME=tdai-local/memory-hub IMAGE_TAG="$TAG" PLATFORM="$PLATFORM" \
   "$ROOT/deploy/panel-knowledge-combined/build.sh"
