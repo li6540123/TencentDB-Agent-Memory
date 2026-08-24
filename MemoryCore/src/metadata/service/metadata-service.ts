@@ -24,6 +24,12 @@ import {
   maskUserKey, isUserKeyExpired, DEFAULT_MAX_ACTIVE_USER_KEYS,
 } from "../utils/user-key.js";
 import {
+  decryptMaasApiKey,
+  encryptMaasApiKey,
+  hintFromMaasApiKey,
+  readMaasKeySecretFromEnv,
+} from "../utils/maas-key-crypto.js";
+import {
   lookupMemorySystemUser,
   isMemorySystemUserKey,
   toMemorySystemVerifyUser,
@@ -679,6 +685,19 @@ export class MetadataService {
     };
   }
 
+  private async attachMaasSummaryToUserKeys(entities: UserKeyEntity[]): Promise<UserKeyPublic[]> {
+    if (entities.length === 0) return [];
+    const creds = await this.store.listMaasCredentialsByKeyIds(entities.map((k) => k.key_id));
+    const byKeyId = new Map(creds.map((c) => [c.key_id, c]));
+    return entities.map((entity) => {
+      const pub = this.toPublicUserKey(entity);
+      const cred = byKeyId.get(entity.key_id);
+      pub.maas_configured = !!cred;
+      pub.maas_key_hint = cred?.key_hint ?? null;
+      return pub;
+    });
+  }
+
   async createUserKey(
     userId: string,
     input: { name?: string | null; expires_at?: string | null },
@@ -702,7 +721,7 @@ export class MetadataService {
   async listUserKeys(userId: string, pagination: PaginationParams = DEFAULT_PAGINATION): Promise<PaginatedResult<UserKeyPublic>> {
     await this.requireUser(userId);
     const page = await this.store.listUserKeys(userId, pagination);
-    const items = page.items.map((k) => this.toPublicUserKey(k));
+    const items = await this.attachMaasSummaryToUserKeys(page.items);
     return formatListResult({ items, total: page.total }, pagination);
   }
 
@@ -731,7 +750,71 @@ export class MetadataService {
     if (isSystemAdminUser(owner) && !isAdmin && callerUserId !== owner.user_id) {
       throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);
     }
-    return this.toPublicUserKey(entity);
+    const [enriched] = await this.attachMaasSummaryToUserKeys([entity]);
+    return enriched ?? this.toPublicUserKey(entity);
+  }
+
+  async setUserKeyMaasApiKeyForCaller(
+    keyId: string,
+    maasApiKey: string,
+    callerUserId?: string,
+    isAdmin = false,
+    isSystemAdmin = false,
+  ): Promise<{ ok: true }> {
+    const entity = await this.store.getUserKeyById(keyId);
+    if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);
+    if (!isAdmin && !isSystemAdmin && entity.user_id !== callerUserId) {
+      throw new MetadataError("permission_denied", "cannot modify another user's key");
+    }
+
+    const trimmed = maasApiKey.trim();
+    if (trimmed === "") {
+      await this.store.deleteMaasCredential(keyId);
+      return { ok: true };
+    }
+
+    const secret = readMaasKeySecretFromEnv();
+    if (!secret) {
+      throw new MetadataError("maas_key_secret_missing", "TDAI_MAAS_KEY_SECRET is not configured");
+    }
+
+    await this.store.upsertMaasCredential({
+      key_id: keyId,
+      user_id: entity.user_id,
+      maas_api_key_ciphertext: encryptMaasApiKey(trimmed, secret),
+      key_hint: hintFromMaasApiKey(trimmed),
+    });
+    return { ok: true };
+  }
+
+  /** Internal：Proxy 按入站 sk-mem 解析 MaaS Key。 */
+  async resolveMaasApiKeyByUserKey(userKey: string): Promise<{ configured: boolean; maas_api_key?: string }> {
+    const keyEntity = await this.store.getUserKeyByValue(userKey);
+    if (!keyEntity || isUserKeyExpired(keyEntity.expires_at)) {
+      return { configured: false };
+    }
+
+    const cred = await this.store.getMaasCredentialByKeyId(keyEntity.key_id);
+    if (!cred) return { configured: false };
+
+    const secret = readMaasKeySecretFromEnv();
+    if (!secret) {
+      console.warn("[META] resolveMaasApiKeyByUserKey: TDAI_MAAS_KEY_SECRET missing");
+      return { configured: false };
+    }
+
+    try {
+      return {
+        configured: true,
+        maas_api_key: decryptMaasApiKey(cred.maas_api_key_ciphertext, secret),
+      };
+    } catch (err: unknown) {
+      console.warn(
+        "[META] resolveMaasApiKeyByUserKey: decrypt failed",
+        err instanceof Error ? err.message : String(err),
+      );
+      return { configured: false };
+    }
   }
 
   async revokeUserKey(keyId: string): Promise<void> {

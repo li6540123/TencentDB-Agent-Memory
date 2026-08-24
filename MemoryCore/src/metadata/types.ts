@@ -265,11 +265,29 @@ export interface UserKeyPublic {
   expires_at?: string | null;
   created_at: string;
   revoked_at?: string | null;
+  /** Hub：是否已绑定 MaaS API Key（无明文）。 */
+  maas_configured?: boolean;
+  maas_key_hint?: string | null;
 }
 
 /** create 响应：仅此一次返回完整 key_value。 */
 export interface UserKeyCreated extends UserKeyPublic {
   key_value: string;
+}
+
+/** 每把 sk-mem 绑定的 MaaS API Key（存储层，密文）。 */
+export interface UserKeyMaasCredentialEntity {
+  key_id: string;
+  user_id: string;
+  maas_api_key_ciphertext: string;
+  key_hint: string | null;
+  updated_at: string;
+}
+
+/** list/get 附加的 MaaS 绑定摘要（无明文）。 */
+export interface UserKeyMaasSummary {
+  maas_configured: boolean;
+  maas_key_hint?: string | null;
 }
 
 export interface AclEntity {

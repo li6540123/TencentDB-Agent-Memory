@@ -24,6 +24,7 @@ import { createPipeline, writeLog } from "./logger.js";
 import { extractSpaceIdFromPath } from "./credit-reporter.js";
 import { joinUrl } from "./guard-adapter.js";
 import { verifyUserKey } from "./auth.js";
+import { resolveEffectiveUpstreamApiKeyWithMaas } from "./upstream/maas-key.js";
 import { resolveModelId } from "./pricing.js";
 import { workbuddyAdapter } from "./agent-adapters/workbuddy.js";
 import {
@@ -449,14 +450,10 @@ function buildWorkbuddyLangfuseInput(body: Record<string, unknown>): unknown {
   return hasInput ? body.input : { instructions: body.instructions };
 }
 
-function buildUpstreamHeaders(c: Context, config: ProxyConfig): Record<string, string> {
+function buildUpstreamHeaders(c: Context, _config: ProxyConfig): Record<string, string> {
   const h: Record<string, string> = {};
   for (const [k, v] of c.req.raw.headers.entries()) {
     if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) h[k] = v;
-  }
-  if (config.upstream.apiKey) {
-    h["authorization"] = `Bearer ${config.upstream.apiKey}`;
-    delete h["x-api-key"];
   }
   return h;
 }
@@ -483,6 +480,8 @@ async function forwardToUpstream(
   modelId: string,
   pipe: ReturnType<typeof createPipeline>,
   lf: LangfuseTurnContext | null,
+  inboundSkMem: string,
+  spaceId: string,
   archiveCtx: WorkbuddyArchiveCtx | null = null,
 ): Promise<Response> {
   // ── Per-agent upstream override ──
@@ -496,9 +495,14 @@ async function forwardToUpstream(
   const upstreamUrl = joinUrl(upstreamBase, upstreamPath);
 
   const headers = buildUpstreamHeaders(c, config);
-  // 若 per-agent 指定了独立 apiKey，覆盖全局注入的 authorization
-  if (perAgent?.apiKey) {
-    headers["authorization"] = `Bearer ${perAgent.apiKey}`;
+  const effectiveApiKey = await resolveEffectiveUpstreamApiKeyWithMaas({
+    inboundSkMem,
+    config,
+    agentName: "workbuddy",
+    spaceId,
+  });
+  if (effectiveApiKey) {
+    headers["authorization"] = `Bearer ${effectiveApiKey}`;
     delete headers["x-api-key"];
   }
   const bodyStr = JSON.stringify(body);
@@ -867,7 +871,7 @@ export async function handleWorkbuddyEndpoint(
   // ── 5. Aux passthrough ───────────────────────────────────────────────────
   if (isAuxiliary) {
     pipe.info("WORKBUDDY_AUX", `auxiliary request → passthrough (path=${path})`);
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, null);
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, apiKey, spaceId);
   }
 
   // ── 6. Session ID + langfuse turn ctx ────────────────────────────────────
@@ -1284,5 +1288,5 @@ export async function handleWorkbuddyEndpoint(
     callerUserKey,
     assetCapabilities,
   });
-  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx);
+  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, apiKey, spaceId, archiveCtx);
 }

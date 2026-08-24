@@ -32,6 +32,7 @@ import { createPipeline, writeLog } from "./logger.js";
 import { extractSpaceIdFromPath } from "./credit-reporter.js";
 import { joinUrl } from "./guard-adapter.js";
 import { verifyUserKey } from "./auth.js";
+import { resolveEffectiveUpstreamApiKeyWithMaas } from "./upstream/maas-key.js";
 import { resolveModelId } from "./pricing.js";
 import { codexAdapter } from "./agent-adapters/codex.js";
 import {
@@ -247,11 +248,7 @@ function buildUpstreamHeaders(
       headers[k] = v;
     }
   }
-  // Codex uses OpenAI protocol: inject Bearer token
-  if (config.upstream.apiKey) {
-    headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
-    delete headers["x-api-key"];
-  }
+  // Codex uses OpenAI protocol; upstream auth injected in forwardToUpstream.
   return headers;
 }
 
@@ -345,7 +342,7 @@ export async function handleCodexEndpoint(
   if (isAuxiliary) {
     pipe.info("CODEX_AUX", `auxiliary request → passthrough (path=${path})`);
     // aux 不上报 langfuse（跟 CC/CB 对齐——sidequery/fork 类 aux 不算真对话轮）
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null);
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, apiKey, spaceId);
   }
 
   // ── 6. Session ID extraction ───────────────────────────────────────────────
@@ -807,7 +804,7 @@ export async function handleCodexEndpoint(
   });
 
   // ── 11. Forward to upstream ────────────────────────────────────────────────
-  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx);
+  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, apiKey, spaceId, archiveCtx);
 }
 
 // ── Archive context (skill/conversation/add + TDAI L0 write) ─────────────────
@@ -950,24 +947,24 @@ async function forwardToUpstream(
   modelId: string,
   pipe: ReturnType<typeof createPipeline>,
   lf: LangfuseTurnContext | null,
+  inboundSkMem: string,
+  spaceId: string,
   archiveCtx: CodexArchiveCtx | null = null,
 ): Promise<Response> {
-  // Per-agent upstream override (upstream.agents.codex.url) 优先于全局 url。
-  // 对齐 anthropicHandler.ts:1029 的解析姿势。codex 通常需要单独指向支持
-  // Responses API 的兼容层——部分 OpenAI 兼容上游只实现
-  // messages/chat_completions，不支持 /responses，此处允许按 agent 覆盖。
   const agentUpstreamEntry = config.upstream.agents?.["codex"];
   const upstreamBase = agentUpstreamEntry?.url || config.upstream.url;
   const upstreamUrl = joinUrl(upstreamBase, c.req.path);
   const upstreamHeaders = buildUpstreamHeaders(c, config);
   upstreamHeaders["content-type"] = "application/json";
-  // 覆盖 apiKey 与 per-agent 策略一致：agentUpstreamEntry.apiKey 优先，
-  // 否则透传客户端 Bearer。
-  if (agentUpstreamEntry) {
-    if (agentUpstreamEntry.apiKey) {
-      upstreamHeaders["authorization"] = `Bearer ${agentUpstreamEntry.apiKey}`;
-    }
-    // else: 保留 c.req.header('authorization') 里的客户端 key 透传
+  const effectiveApiKey = await resolveEffectiveUpstreamApiKeyWithMaas({
+    inboundSkMem,
+    config,
+    agentName: "codex",
+    spaceId,
+  });
+  if (effectiveApiKey) {
+    upstreamHeaders["authorization"] = `Bearer ${effectiveApiKey}`;
+    delete upstreamHeaders["x-api-key"];
   }
 
   pipe.forwardStart(upstreamUrl);

@@ -15,7 +15,7 @@ import type { Logger } from "../../core/types.js";
 import { MetadataService, MetadataError } from "../service/metadata-service.js";
 import { extractInstanceId, normalizeInstanceIdForRoute } from "./instance.js";
 import { resolvePagination } from "./pagination.js";
-import { internalListUsersByInstanceSchema, initAdminSchema } from "./v3-meta-schemas.js";
+import { internalListUsersByInstanceSchema, initAdminSchema, userKeyMaasKeyResolveSchema } from "./v3-meta-schemas.js";
 import {
   createMetaApiTraceContext,
   logMetaApiEntry,
@@ -58,6 +58,10 @@ function bind<S extends ZodType>(
 
 const routeTable: Record<string, InternalHandler> = {
   [`${V3_INTERNAL_PREFIX}/user/init-admin`]: bind(initAdminSchema, (d, svc) => svc.initAdminUser(d)),
+  [`${V3_INTERNAL_PREFIX}/user-key/maas-key/resolve`]: bind(
+    userKeyMaasKeyResolveSchema,
+    (d, svc) => svc.resolveMaasApiKeyByUserKey(d.user_key),
+  ),
   [`${V3_INTERNAL_PREFIX}/user/list-by-instance`]: bind(
     internalListUsersByInstanceSchema,
     async (d, svc, instanceId) => {

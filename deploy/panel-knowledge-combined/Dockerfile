@@ -1,5 +1,10 @@
 FROM node:22-slim AS base
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY https_proxy=$HTTPS_PROXY
+
 # apt 源默认走 Debian 官方，公网可直接构建。内网构建加速：
 #   docker build --build-arg APT_MIRROR=mirrors.tencent.com .
 ARG APT_MIRROR=deb.debian.org

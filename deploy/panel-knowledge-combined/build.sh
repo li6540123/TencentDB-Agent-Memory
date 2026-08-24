@@ -21,8 +21,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"          # memory-tencentdb 根
-WORKSPACE_ROOT="$(dirname "$REPO_ROOT")"               # 上一级（默认 CTX_DIR 落点）
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROXY_ENV="$REPO_ROOT/deploy/internal-team/proxy-env.sh"
+if [[ -f "$PROXY_ENV" ]]; then
+  # shellcheck disable=SC1091
+  source "$PROXY_ENV"
+  resolve_build_proxy "$REPO_ROOT/deploy/internal-team"
+  apply_host_proxy
+fi
+
+WORKSPACE_ROOT="$(dirname "$REPO_ROOT")"
 
 TMC_DIR="${TMC_DIR:-$REPO_ROOT/MemoryPanel}"
 KNOWLEDGE_DIR="${KNOWLEDGE_DIR:-$REPO_ROOT/MemoryKnowledge}"
@@ -125,7 +133,13 @@ fi
 
 # build
 echo "[build-combined] docker build --platform $PLATFORM -t $IMAGE_NAME:$IMAGE_TAG $CTX_DIR"
-docker build --platform "$PLATFORM" -t "$IMAGE_NAME:$IMAGE_TAG" "$CTX_DIR"
+BUILD_ARGS=()
+if [[ -f "$PROXY_ENV" ]]; then
+  docker_build_proxy_argv
+  BUILD_ARGS=("${DOCKER_BUILD_PROXY_ARGV[@]}")
+  echo "[build-combined] docker build 代理=${DOCKER_HTTP_PROXY:-（未配置）}"
+fi
+docker build --platform "$PLATFORM" "${BUILD_ARGS[@]}" -t "$IMAGE_NAME:$IMAGE_TAG" "$CTX_DIR"
 
 echo ""
 echo "[build-combined] ✅ done: $IMAGE_NAME:$IMAGE_TAG"

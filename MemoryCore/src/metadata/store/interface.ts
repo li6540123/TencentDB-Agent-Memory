@@ -14,6 +14,7 @@
 import type {
   UserEntity,
   UserKeyEntity,
+  UserKeyMaasCredentialEntity,
   TeamEntity,
   TeamMemberEntity,
   TeamMemberView,
@@ -102,6 +103,18 @@ export interface IMetadataStore {
   touchUserKeyUsage(keyId: string): MaybePromise<void>;
   revokeAllUserKeysForUser(userId: string): MaybePromise<void>;
   getDefaultUserKey(userId: string): MaybePromise<UserKeyEntity | null>;
+  getUserKeyByValue(userKey: string): MaybePromise<UserKeyEntity | null>;
+
+  // ── UserKey MaaS credentials ──
+  upsertMaasCredential(input: {
+    key_id: string;
+    user_id: string;
+    maas_api_key_ciphertext: string;
+    key_hint: string | null;
+  }): MaybePromise<UserKeyMaasCredentialEntity>;
+  deleteMaasCredential(keyId: string): MaybePromise<void>;
+  getMaasCredentialByKeyId(keyId: string): MaybePromise<UserKeyMaasCredentialEntity | null>;
+  listMaasCredentialsByKeyIds(keyIds: string[]): MaybePromise<UserKeyMaasCredentialEntity[]>;
 
   // ── Team ──（createTeam 自动把 owner 加为 admin 成员）
   createTeam(input: CreateTeamInput): MaybePromise<TeamEntity>;

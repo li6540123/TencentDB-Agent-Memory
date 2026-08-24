@@ -850,5 +850,83 @@ export function runMetadataStoreContract(
         expect(userLevel!.param_value).toBe("0");
       });
     });
+
+    // ── UserKey MaaS credentials ──
+    describe("UserKey MaaS credentials", () => {
+      it("upsertMaasCredential + getMaasCredentialByKeyId + listMaasCredentialsByKeyIds", async () => {
+        const u = await store.createUser(uniqueUserInput());
+        const key = await store.createUserKey({ user_id: u.user_id, name: "work" });
+        const saved = await store.upsertMaasCredential({
+          key_id: key.key_id,
+          user_id: u.user_id,
+          maas_api_key_ciphertext: "v1:iv:tag:cipher",
+          key_hint: "abcd",
+        });
+        expect(saved.key_hint).toBe("abcd");
+        expect(await store.getMaasCredentialByKeyId(key.key_id)).toMatchObject({
+          key_id: key.key_id,
+          user_id: u.user_id,
+          key_hint: "abcd",
+        });
+        const listed = await store.listMaasCredentialsByKeyIds([key.key_id, "key-missing"]);
+        expect(listed).toHaveLength(1);
+        expect(listed[0]!.key_id).toBe(key.key_id);
+      });
+
+      it("upsertMaasCredential 覆盖同 key_id", async () => {
+        const u = await store.createUser(uniqueUserInput());
+        const key = await store.createUserKey({ user_id: u.user_id });
+        await store.upsertMaasCredential({
+          key_id: key.key_id,
+          user_id: u.user_id,
+          maas_api_key_ciphertext: "old",
+          key_hint: "0000",
+        });
+        await store.upsertMaasCredential({
+          key_id: key.key_id,
+          user_id: u.user_id,
+          maas_api_key_ciphertext: "new",
+          key_hint: "9999",
+        });
+        const cred = await store.getMaasCredentialByKeyId(key.key_id);
+        expect(cred?.maas_api_key_ciphertext).toBe("new");
+        expect(cred?.key_hint).toBe("9999");
+      });
+
+      it("deleteMaasCredential 清除绑定", async () => {
+        const u = await store.createUser(uniqueUserInput());
+        const key = await store.createUserKey({ user_id: u.user_id });
+        await store.upsertMaasCredential({
+          key_id: key.key_id,
+          user_id: u.user_id,
+          maas_api_key_ciphertext: "cipher",
+          key_hint: "1234",
+        });
+        await store.deleteMaasCredential(key.key_id);
+        expect(await store.getMaasCredentialByKeyId(key.key_id)).toBeNull();
+      });
+
+      it("revokeUserKey CASCADE 删除 MaaS 凭据", async () => {
+        const u = await store.createUser(uniqueUserInput());
+        const key = await store.createUserKey({ user_id: u.user_id });
+        await store.upsertMaasCredential({
+          key_id: key.key_id,
+          user_id: u.user_id,
+          maas_api_key_ciphertext: "cipher",
+          key_hint: "1234",
+        });
+        await store.revokeUserKey(key.key_id);
+        expect(await store.getMaasCredentialByKeyId(key.key_id)).toBeNull();
+        expect(await store.getUserKeyById(key.key_id)).toBeNull();
+      });
+
+      it("getUserKeyByValue 供 resolve 反查", async () => {
+        const sk = `sk-mem-maas-${Math.random().toString(36).slice(2)}`;
+        const u = await store.createUser(uniqueUserInput({ default_key_value: sk }));
+        const key = await store.getDefaultUserKey(u.user_id);
+        expect(key).toBeTruthy();
+        expect(await store.getUserKeyByValue(sk)).toMatchObject({ key_id: key!.key_id });
+      });
+    });
   });
 }

@@ -23,6 +23,7 @@ import { isUserKeyExpired } from "../utils/user-key.js";
 import type {
   UserEntity,
   UserKeyEntity,
+  UserKeyMaasCredentialEntity,
   TeamEntity,
   TeamMemberEntity,
   TeamMemberView,
@@ -158,6 +159,15 @@ export class SqliteMetadataStore implements IMetadataStore {
         metadata_json TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS idx_meta_user_keys_user ON meta_user_keys(user_id, status);
+      CREATE TABLE IF NOT EXISTS meta_user_key_maas_credentials (
+        key_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        maas_api_key_ciphertext TEXT NOT NULL,
+        key_hint TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (key_id) REFERENCES meta_user_keys(key_id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES meta_users(user_id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS meta_teams (
         team_id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -731,6 +741,74 @@ export class SqliteMetadataStore implements IMetadataStore {
       "DELETE FROM meta_user_keys WHERE user_id = ? AND status = 'active'",
       userId,
     );
+  }
+
+  getUserKeyByValue(userKey: string): UserKeyEntity | null {
+    return this.mapUserKey(
+      this.get(
+        "SELECT * FROM meta_user_keys WHERE key_value = ? AND status = 'active'",
+        userKey,
+      ),
+    );
+  }
+
+  upsertMaasCredential(input: {
+    key_id: string;
+    user_id: string;
+    maas_api_key_ciphertext: string;
+    key_hint: string | null;
+  }): UserKeyMaasCredentialEntity {
+    const now = nowIso();
+    this.run(
+      `INSERT INTO meta_user_key_maas_credentials
+        (key_id, user_id, maas_api_key_ciphertext, key_hint, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(key_id) DO UPDATE SET
+         maas_api_key_ciphertext = excluded.maas_api_key_ciphertext,
+         key_hint = excluded.key_hint,
+         updated_at = excluded.updated_at`,
+      input.key_id,
+      input.user_id,
+      input.maas_api_key_ciphertext,
+      input.key_hint,
+      now,
+    );
+    return this.getMaasCredentialByKeyId(input.key_id)!;
+  }
+
+  deleteMaasCredential(keyId: string): void {
+    this.run("DELETE FROM meta_user_key_maas_credentials WHERE key_id = ?", keyId);
+  }
+
+  getMaasCredentialByKeyId(keyId: string): UserKeyMaasCredentialEntity | null {
+    const row = this.get(
+      "SELECT * FROM meta_user_key_maas_credentials WHERE key_id = ?",
+      keyId,
+    );
+    if (!row) return null;
+    return {
+      key_id: String(row.key_id),
+      user_id: String(row.user_id),
+      maas_api_key_ciphertext: String(row.maas_api_key_ciphertext),
+      key_hint: row.key_hint == null ? null : String(row.key_hint),
+      updated_at: String(row.updated_at),
+    };
+  }
+
+  listMaasCredentialsByKeyIds(keyIds: string[]): UserKeyMaasCredentialEntity[] {
+    if (keyIds.length === 0) return [];
+    const ph = keyIds.map(() => "?").join(",");
+    const rows = this.all(
+      `SELECT * FROM meta_user_key_maas_credentials WHERE key_id IN (${ph})`,
+      ...keyIds,
+    );
+    return rows.map((row) => ({
+      key_id: String(row.key_id),
+      user_id: String(row.user_id),
+      maas_api_key_ciphertext: String(row.maas_api_key_ciphertext),
+      key_hint: row.key_hint == null ? null : String(row.key_hint),
+      updated_at: String(row.updated_at),
+    }));
   }
 
   // ============================================================

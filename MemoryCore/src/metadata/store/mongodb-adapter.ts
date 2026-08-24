@@ -27,6 +27,7 @@ import { isUserKeyExpired } from "../utils/user-key.js";
 import type {
   UserEntity,
   UserKeyEntity,
+  UserKeyMaasCredentialEntity,
   TeamEntity,
   TeamMemberEntity,
   TeamMemberView,
@@ -188,6 +189,9 @@ export class MongoMetadataStore implements IMetadataStore {
     await this.ensureIndex("meta_user_keys", { key_value: 1 }, { unique: true });
     await this.ensureIndex("meta_user_keys", { user_id: 1, status: 1 });
     await this.ensureIndex("meta_user_keys", { user_id: 1, created_at: -1 });
+
+    await this.ensureIndex("meta_user_key_maas_credentials", { key_id: 1 }, { unique: true });
+    await this.ensureIndex("meta_user_key_maas_credentials", { user_id: 1 });
 
     // ── meta_teams ──
     await this.ensureIndex("meta_teams", { team_id: 1 }, { unique: true });
@@ -597,6 +601,55 @@ export class MongoMetadataStore implements IMetadataStore {
     await this.col("meta_user_keys").deleteMany(
       { user_id: userId, status: "active" } as Document,
     );
+  }
+
+  async getUserKeyByValue(userKey: string): Promise<UserKeyEntity | null> {
+    const doc = await this.col<UserKeyEntity>("meta_user_keys").findOne(
+      { key_value: userKey, status: "active" } as Document,
+      PROJECT_NO_ID,
+    );
+    if (!doc || isUserKeyExpired(doc.expires_at)) return null;
+    return doc as UserKeyEntity;
+  }
+
+  async upsertMaasCredential(input: {
+    key_id: string;
+    user_id: string;
+    maas_api_key_ciphertext: string;
+    key_hint: string | null;
+  }): Promise<UserKeyMaasCredentialEntity> {
+    const now = nowIso();
+    const doc: UserKeyMaasCredentialEntity = {
+      key_id: input.key_id,
+      user_id: input.user_id,
+      maas_api_key_ciphertext: input.maas_api_key_ciphertext,
+      key_hint: input.key_hint,
+      updated_at: now,
+    };
+    await this.col("meta_user_key_maas_credentials").updateOne(
+      { key_id: input.key_id } as Document,
+      { $set: doc },
+      { upsert: true },
+    );
+    return doc;
+  }
+
+  async deleteMaasCredential(keyId: string): Promise<void> {
+    await this.col("meta_user_key_maas_credentials").deleteOne({ key_id: keyId } as Document);
+  }
+
+  async getMaasCredentialByKeyId(keyId: string): Promise<UserKeyMaasCredentialEntity | null> {
+    return this.col<UserKeyMaasCredentialEntity>("meta_user_key_maas_credentials").findOne(
+      { key_id: keyId } as Document,
+      PROJECT_NO_ID,
+    ) as Promise<UserKeyMaasCredentialEntity | null>;
+  }
+
+  async listMaasCredentialsByKeyIds(keyIds: string[]): Promise<UserKeyMaasCredentialEntity[]> {
+    if (keyIds.length === 0) return [];
+    return this.col<UserKeyMaasCredentialEntity>("meta_user_key_maas_credentials")
+      .find({ key_id: { $in: keyIds } } as Document, PROJECT_NO_ID)
+      .toArray() as Promise<UserKeyMaasCredentialEntity[]>;
   }
 
   // ============================================================

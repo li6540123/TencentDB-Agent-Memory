@@ -131,6 +131,18 @@ const routeTable: Record<string, Handler> = {
     const { key_id, ...patch } = d;
     return s.updateUserKey(key_id, patch);
   }),
+  [`${V3_PREFIX}/user-key/maas-key/set`]: bind(S.userKeyMaasKeySetSchema, async (d, c, s) => {
+    const entity = await s.rawStore.getUserKeyById(d.key_id);
+    if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${d.key_id}`);
+    s.assertUserScope(entity.user_id, c.userId, c.isAdmin, c.isSystemAdmin);
+    return s.setUserKeyMaasApiKeyForCaller(
+      d.key_id,
+      d.maas_api_key,
+      c.userId,
+      c.isAdmin,
+      c.isSystemAdmin,
+    );
+  }),
 
   // Team
   [`${V3_PREFIX}/team/create`]: bind(S.teamCreateSchema, (d, c, s) => s.createTeamForCaller(d, c)),
@@ -338,6 +350,8 @@ function mapErrorCode(code: string): number {
     case "invalid_password":
       return 401;
     case "missing_instance_id":
+    case "maas_key_secret_missing":
+      return 400;
     case "invalid_instance_id":
     case "missing_team_id":
     case "filter_not_allowed":

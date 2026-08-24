@@ -1,0 +1,111 @@
+name: tdai-internal
+
+services:
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: tdai-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [tdai]
+
+  memory-core:
+    image: ${MEMORY_CORE_IMAGE}
+    container_name: tdai-memory-core
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${MEMORY_CORE_PORT:-8420}:8420"
+    volumes:
+      - core-data:/data/tdai-memory
+      - ./runtime/tdai-gateway.yaml:/data/config/tdai-gateway.yaml:ro
+    environment:
+      TDAI_GATEWAY_PORT: "8420"
+      TDAI_GATEWAY_HOST: "0.0.0.0"
+      TDAI_GATEWAY_API_KEY: "${MEMORY_CORE_GATEWAY_API_KEY:-}"
+      TDAI_DATA_DIR: /data/tdai-memory
+      TDAI_LLM_MAX_TOKENS: "${MEMORY_LLM_MAX_TOKENS:-4096}"
+      TDAI_LLM_TIMEOUT_MS: "${MEMORY_LLM_TIMEOUT_MS:-120000}"
+      TDAI_MAAS_KEY_SECRET: "${TDAI_MAAS_KEY_SECRET:-}"
+    networks:
+      tdai:
+        aliases: [memory-core]
+
+  memory-hub:
+    image: ${MEMORY_HUB_IMAGE}
+    container_name: tdai-memory-hub
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PANEL_PORT:-8125}:8125"
+      - "${KNOWLEDGE_PORT:-8424}:8424"
+    volumes:
+      - hub-data:/data/knowledge
+    environment:
+      PANEL_PORT: "8125"
+      KNOWLEDGE_PORT: "8424"
+      KNOWLEDGE_PUBLIC_BASE_URL: "${KNOWLEDGE_PUBLIC_BASE_URL}"
+      REMOTE_INSTANCE_ID: default
+      REMOTE_INSTANCE_NAME: default
+      REMOTE_INSTANCE_URL: http://memory-core:8420
+      # Hub 启动脚本要求非空；Core 网关 Key 必须留空时用 local 占位（与官方 start-memory-hub.sh 一致）
+      REMOTE_INSTANCE_KEY: "${PROXY_CORE_SERVICE_TOKEN:-local}"
+      REMOTE_INSTANCE_PROXY_URL: "http://${PUBLIC_HOST}:${PROXY_PORT:-8096}"
+      LLM_MODE: custom
+      LLM_PROTOCOL: "${MEMORY_LLM_PROTOCOL:-openai}"
+      LLM_API_KEY: "${MEMORY_LLM_API_KEY}"
+      LLM_BASE_URL: "${MEMORY_LLM_BASE_URL}"
+      LLM_MODEL: "${MEMORY_LLM_MODEL}"
+      LLM_MAX_TOKENS: "${MEMORY_LLM_MAX_TOKENS:-4096}"
+      LLM_TIMEOUT_MS: "${MEMORY_LLM_TIMEOUT_MS:-120000}"
+      KNOWLEDGE_LLM_BINDING_SYNC: "0"
+      VITE_PROXY_MAAS_KEY_CACHE_TTL_MS: "${PROXY_MAAS_KEY_CACHE_TTL_MS:-60000}"
+    depends_on:
+      memory-core:
+        condition: service_started
+    networks: [tdai]
+
+  proxy:
+    image: ${PROXY_IMAGE}
+    container_name: tdai-proxy
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PROXY_PORT:-8096}:8096"
+    volumes:
+      - ./runtime/proxy-config.yaml:/data/config.yaml:ro
+    environment:
+      PROXY_MAAS_KEY_CACHE_TTL_MS: "${PROXY_MAAS_KEY_CACHE_TTL_MS:-60000}"
+      PROXY_MAAS_KEY_RESOLVE_TIMEOUT_MS: "${PROXY_MAAS_KEY_RESOLVE_TIMEOUT_MS:-1500}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      memory-core:
+        condition: service_started
+    networks: [tdai]
+
+networks:
+  tdai:
+    name: tdai-memory-stack
+
+volumes:
+  core-data:
+    name: tdai-core-data
+  hub-data:
+    name: tdai-hub-data
+  redis-data:
+    name: tdai-redis-data
