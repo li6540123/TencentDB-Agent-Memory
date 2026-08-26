@@ -34,9 +34,11 @@ import {
   H3,
   Form,
   Modal,
+  Input,
 } from 'tea-component';
 import { AddIcon } from 'tea-icons-react';
 import { userKeysApi, metaInstancesApi, type UserKey } from '@/lib/teamApi';
+import { formatMaasCacheTtlHint, getMaasCacheTtlMs } from '@/lib/maas-cache-ttl';
 import { useCurrentRole } from '@/services/useCurrentRole';
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
@@ -104,6 +106,12 @@ export default function ApiKeyPanel() {
   // 刚创建出来的 key（含完整明文，仅展示一次）
   const [freshKey, setFreshKey] = useState<{ keyId: string; secret: string } | null>(null);
 
+  const [maasModalKey, setMaasModalKey] = useState<UserKey | null>(null);
+  const [maasInput, setMaasInput] = useState('');
+  const [maasSaving, setMaasSaving] = useState(false);
+
+  const effectiveHint = formatMaasCacheTtlHint(getMaasCacheTtlMs(), t);
+
   async function handleCreate() {
     setCreating(true);
     try {
@@ -132,6 +140,46 @@ export default function ApiKeyPanel() {
     if (!ok) return;
     try {
       await userKeysApi.revoke(key.key_id);
+      await refresh();
+    } catch (e) {
+      tea.notify.error(e);
+    }
+  }
+
+  function openMaasModal(key: UserKey) {
+    setMaasModalKey(key);
+    setMaasInput('');
+  }
+
+  async function handleMaasSave() {
+    if (!maasModalKey) return;
+    setMaasSaving(true);
+    try {
+      await userKeysApi.setMaasKey({
+        key_id: maasModalKey.key_id,
+        maas_api_key: maasInput.trim(),
+      });
+      setMaasModalKey(null);
+      setMaasInput('');
+      tea.notify.success(t('apiKey.maas.saveSuccess', { effectiveHint }));
+      await refresh();
+    } catch (e) {
+      tea.notify.error(e);
+    } finally {
+      setMaasSaving(false);
+    }
+  }
+
+  async function handleMaasClear(key: UserKey) {
+    const ok = await tea.confirm({
+      message: t('apiKey.maas.confirm.clear'),
+      description: t('apiKey.maas.confirm.clear.desc'),
+      okText: t('apiKey.maas.confirm.clear.ok'),
+    });
+    if (!ok) return;
+    try {
+      await userKeysApi.setMaasKey({ key_id: key.key_id, maas_api_key: '' });
+      tea.notify.success(t('apiKey.maas.clearSuccess', { effectiveHint }));
       await refresh();
     } catch (e) {
       tea.notify.error(e);
@@ -227,6 +275,34 @@ export default function ApiKeyPanel() {
                 <Text parent="code" style={{ fontSize: 12 }}>
                   {key.key_prefix || '—'}
                 </Text>
+              ),
+            },
+            {
+              key: 'maas_key',
+              header: t('apiKey.table.maasKey'),
+              width: 220,
+              render: (key) => (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {key.maas_configured ? (
+                    <Text theme="text">
+                      {key.maas_key_hint
+                        ? t('apiKey.maas.hint', { hint: key.maas_key_hint })
+                        : t('apiKey.maas.configured')}
+                    </Text>
+                  ) : (
+                    <Text theme="weak">{t('apiKey.maas.notConfigured')}</Text>
+                  )}
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Button type="link" onClick={() => openMaasModal(key)}>
+                      {key.maas_configured ? t('apiKey.maas.edit') : t('apiKey.maas.add')}
+                    </Button>
+                    {key.maas_configured ? (
+                      <Button type="link" onClick={() => void handleMaasClear(key)}>
+                        {t('apiKey.maas.clear')}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
               ),
             },
             {
@@ -393,6 +469,59 @@ export default function ApiKeyPanel() {
             </Button>
             <Button onClick={() => setShowCreate(false)} disabled={creating}>
               {t('apiKey.create.cancel')}
+            </Button>
+          </Modal.Footer>
+        </Modal>
+      )}
+      {maasModalKey && (
+        <Modal
+          visible
+          caption={
+            maasModalKey.maas_configured
+              ? t('apiKey.maas.modal.titleEdit')
+              : t('apiKey.maas.modal.titleAdd')
+          }
+          size="m"
+          onClose={() => {
+            if (!maasSaving) {
+              setMaasModalKey(null);
+              setMaasInput('');
+            }
+          }}
+          disableEscape={maasSaving}
+        >
+          <Modal.Body>
+            <Text theme="weak" parent="p" style={{ marginBottom: 12 }}>
+              {t('apiKey.maas.modal.desc')}
+            </Text>
+            <Form>
+              <Form.Item label={t('apiKey.table.maasKey')}>
+                <Input
+                  value={maasInput}
+                  onChange={(v) => setMaasInput(v)}
+                  placeholder={t('apiKey.maas.modal.placeholder')}
+                  type="password"
+                />
+              </Form.Item>
+            </Form>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button
+              type="primary"
+              onClick={() => void handleMaasSave()}
+              disabled={maasSaving || !maasInput.trim()}
+              loading={maasSaving}
+            >
+              {t('apiKey.maas.modal.submit')}
+            </Button>
+            <Button
+              onClick={() => {
+                setMaasModalKey(null);
+                setMaasInput('');
+              }}
+              disabled={maasSaving}
+            >
+              {t('apiKey.maas.modal.cancel')}
             </Button>
           </Modal.Footer>
         </Modal>

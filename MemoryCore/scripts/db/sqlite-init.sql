@@ -49,6 +49,17 @@ CREATE TABLE IF NOT EXISTS meta_user_keys (
 CREATE INDEX IF NOT EXISTS idx_meta_user_keys_user ON meta_user_keys(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_meta_user_keys_user_created ON meta_user_keys(user_id, created_at DESC);
 
+-- ── meta_user_key_maas_credentials（per-sk-mem MaaS API Key 绑定）──
+CREATE TABLE IF NOT EXISTS meta_user_key_maas_credentials (
+  key_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  maas_api_key_ciphertext TEXT NOT NULL,
+  key_hint TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (key_id) REFERENCES meta_user_keys(key_id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES meta_users(user_id) ON DELETE CASCADE
+);
+
 -- ── meta_teams ──
 CREATE TABLE IF NOT EXISTS meta_teams (
   team_id TEXT PRIMARY KEY,

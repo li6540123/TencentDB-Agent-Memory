@@ -1,0 +1,51 @@
+# 本地 Colima / 无 buildx 时使用。
+#   docker build -f Dockerfile.local -t tdai-local/memory-proxy:maas-dev .
+
+FROM node:22-slim AS deps-builder
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY https_proxy=$HTTPS_PROXY
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 make g++ ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN npm install -g npm@11 --no-audit --no-fund
+
+COPY package.json package-lock.json ./
+RUN npm install --no-audit --no-fund
+
+COPY . .
+
+FROM node:22-slim AS runtime
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY \
+    http_proxy=$HTTP_PROXY https_proxy=$HTTPS_PROXY
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl tini ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN groupadd -r app && useradd -r -g app -u 10001 -m app
+
+COPY --from=deps-builder /app /app
+RUN mkdir -p /data/tdai-memory-proxy /data/config /app/logs && chown -R app:app /app /data
+
+USER app
+
+ENV NODE_ENV=production \
+    PROXY_DB_PATH=/data/tdai-memory-proxy/proxy.db \
+    NODE_OPTIONS="--max-old-space-size=1536"
+
+EXPOSE 8096
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+    CMD curl -fsS http://127.0.0.1:8096/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "--import", "tsx/esm", "src/index.ts"]
+CMD ["--config", "/data/config.yaml"]

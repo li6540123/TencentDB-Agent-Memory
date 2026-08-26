@@ -29,6 +29,10 @@ database.meta_user_keys.createIndex({ key_value: 1 }, { unique: true });
 database.meta_user_keys.createIndex({ user_id: 1, status: 1 });
 database.meta_user_keys.createIndex({ user_id: 1, created_at: -1 });
 
+// ── meta_user_key_maas_credentials（per-sk-mem MaaS API Key 绑定）──
+database.meta_user_key_maas_credentials.createIndex({ key_id: 1 }, { unique: true });
+database.meta_user_key_maas_credentials.createIndex({ user_id: 1 });
+
 // ── meta_teams ──
 database.meta_teams.createIndex({ team_id: 1 }, { unique: true });
 database.meta_teams.createIndex({ created_at: -1 });

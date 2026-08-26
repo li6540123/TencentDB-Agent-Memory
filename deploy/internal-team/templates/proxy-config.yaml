@@ -1,0 +1,82 @@
+# 由 ./up.sh 从 .env 生成，不要手改 runtime/ 里的副本。
+server:
+  host: 0.0.0.0
+  port: 8096
+  forwardTimeoutMs: 600000
+
+upstream:
+  url: "${PROXY_UPSTREAM_URL}"
+  apiKey: "${PROXY_UPSTREAM_API_KEY}"
+${UPSTREAM_AGENTS_YAML}
+
+log:
+  file: ""
+  level: info
+  backend: console
+
+tdai:
+  enabled: true
+  endpoint: "http://memory-core:8420"
+  apiKey: "${MEMORY_CORE_GATEWAY_API_KEY}"
+  serviceId: default
+  memory:
+    enabled: true
+    inject: true
+    writeL0: true
+    recallL1: true
+    injectL2L3: true
+
+skill:
+  endpoint: "http://memory-core:8420"
+  serviceToken: "${PROXY_CORE_SERVICE_TOKEN}"
+
+# 知识库注入独立于 tdai.apiKey。serviceToken 必须非空，否则 injector 不注册。
+# Core 的 GATEWAY key 仍为空时，这里用占位符 local（v3 只要非空 Bearer，不校验）。
+knowledge:
+  enabled: true
+  endpoint: "http://memory-core:8420"
+  serviceToken: "${PROXY_CORE_SERVICE_TOKEN}"
+  serviceId: default
+  timeoutMs: 5000
+
+auth:
+  enabled: true
+  url: "http://memory-core:8420"
+  timeoutMs: 5000
+
+sessionInit:
+  enabled: true
+  maxRetries: 3
+  injectAgentContext: true
+  injectTaskContext: true
+  # 官方镜像能力：弹窗最前加「本次不关联任务」。不配则没选 task 会 bypass，对话不写 L0。
+  defaultTaskId: "no-task"
+  headerAutoSelect:
+    enabled: true
+    teamHeader: "x-team-id"
+    agentHeader: "x-agent-id"
+    taskHeader: "x-task-id"
+    onMismatch: "form"
+
+costGuard:
+  enabled: false
+
+injection:
+  enabled: true
+  # Claude Code 在宿主机 curl skill/memory-bridge；必须是本机可达地址，不能用容器网桥 IP。
+  externalGatewayUrl: "http://${PUBLIC_HOST}:${PROXY_PORT}"
+  injectors:
+    - skill
+    - knowledge
+    - tdai-memory
+
+redis:
+  enabled: true
+  host: "tdai-redis"
+  port: 6379
+  password: "${REDIS_PASSWORD}"
+  db: 0
+  ttlSeconds: 1800
+
+storage:
+  enabled: false

@@ -81,6 +81,13 @@ export const userKeyUpdateSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   expires_at: z.string().datetime().nullable().optional(),
 });
+export const userKeyMaasKeySetSchema = z.object({
+  key_id: nonEmpty,
+  maas_api_key: z.string(),
+});
+export const userKeyMaasKeyResolveSchema = z.object({
+  user_key: nonEmpty,
+});
 
 // ── Team ──
 export const teamCreateSchema = z.object({
@@ -404,6 +411,7 @@ export const V3_SCHEMAS = {
   "/v3/meta/user-key/get": userKeyGetSchema,
   "/v3/meta/user-key/revoke": userKeyRevokeSchema,
   "/v3/meta/user-key/update": userKeyUpdateSchema,
+  "/v3/meta/user-key/maas-key/set": userKeyMaasKeySetSchema,
   "/v3/meta/team/create": teamCreateSchema,
   "/v3/meta/team/get": teamGetSchema,
   "/v3/meta/team/update": teamUpdateSchema,

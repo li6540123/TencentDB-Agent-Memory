@@ -1,0 +1,62 @@
+# 由 ./up.sh 从 .env 生成，不要手改 runtime/ 里的副本。
+deployMode: standalone
+stateBackend: local
+
+server:
+  port: 8420
+  host: 0.0.0.0
+
+data:
+  baseDir: /data/tdai-memory
+
+llm:
+  baseUrl: "${MEMORY_LLM_BASE_URL}"
+  apiKey: "${MEMORY_LLM_API_KEY}"
+  model: "${MEMORY_LLM_MODEL}"
+  maxTokens: ${MEMORY_LLM_MAX_TOKENS}
+  timeoutMs: ${MEMORY_LLM_TIMEOUT_MS}
+
+memory:
+  promptMode: chat
+  capture: { enabled: true }
+  extraction:
+    enabled: true
+    enableDedup: true
+    maxMemoriesPerSession: 20
+  persona:
+    triggerEveryN: 50
+    maxScenes: 15
+  pipeline:
+    everyNConversations: 5
+    enableWarmup: true
+    l1IdleTimeoutSeconds: 600
+    l2DelayAfterL1Seconds: 90
+    l2MinIntervalSeconds: 900
+    l2MaxIntervalSeconds: 3600
+  recall:
+    enabled: true
+    maxResults: 5
+    scoreThreshold: 0.3
+    strategy: hybrid
+    timeoutMs: 5000
+  storeBackend: sqlite
+${EMBEDDING_YAML}
+
+skill:
+  enabled: true
+  routing:
+    mode: bm25
+    searchTopK: 20
+  extraction:
+    enabled: true
+    maxIterations: 16
+    archiveBytes: ${MEMORY_SKILL_ARCHIVE_BYTES}
+    queue:
+      backend: local
+      keyPrefix: tdai
+      resultTtlSeconds: 86400
+      lockTtlMs: 600000
+      maxRetries: 2
+      retryBackoffsMs: [5000, 15000]
+  resources:
+    maxResourceSizeBytes: 5000000

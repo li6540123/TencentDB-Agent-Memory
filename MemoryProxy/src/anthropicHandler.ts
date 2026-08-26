@@ -39,6 +39,7 @@ import { resolveModelId, isModelInPricing } from "./pricing.js";
 import { inspectAndRecord } from "./identity.js";
 import { writeFailedReportRaw } from "./clickhouse.js";
 import { verifyUserKey } from "./auth.js";
+import { resolveEffectiveUpstreamApiKeyWithMaas } from "./upstream/maas-key.js";
 import { matchSystemUserByUserId, hasSystemUsers } from "./systemUser.js";
 import { handleSystemUserPassthrough } from "./systemUserPassthrough.js";
 import { TdaiClient } from "./tdai/client.js";
@@ -1317,17 +1318,19 @@ export async function handleAnthropicMessages(
   writeRequestLog(config, body);
 
   // ── Build upstream request ───────────────────────────────────────────────
-  // Per-agent apiKey resolution — three cases:
-  //   (a) no entry in agents map           → global upstream.apiKey (兜底)
-  //   (b) entry present, apiKey empty      → "" (passthrough, keep client key)
-  //   (c) entry present, apiKey non-empty  → agent.apiKey (server-side key)
-  // The presence of an entry (case b/c) is what cuts the global fallback —
-  // this is the switch that lets one proxy serve mixed server-key / client-key
-  // agents from a single config.
-  const effectiveApiKey = agentUpstreamEntry
-    ? (agentUpstreamEntry.apiKey ?? "")
-    : config.upstream.apiKey;
-  const upstreamHeaders = buildUpstreamHeaders(c, config, target, sessionKey, effectiveApiKey);
+  const effectiveApiKey = await resolveEffectiveUpstreamApiKeyWithMaas({
+    inboundSkMem: apiKey,
+    config,
+    agentName: agentFromPath,
+    spaceId,
+  });
+  const upstreamHeaders = buildUpstreamHeaders(
+    c,
+    config,
+    target,
+    sessionKey,
+    effectiveApiKey,
+  );
 
   // Optional private preparation stage. It rewrites `body` / `messages` in
   // place, so it has to land after every host-side mutation (injection, agent

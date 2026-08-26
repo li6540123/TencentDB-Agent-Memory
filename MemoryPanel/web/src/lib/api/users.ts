@@ -67,6 +67,8 @@ export interface UserKey {
   expires_at?: string;
   revoked_at?: string;
   last_used_at?: string;
+  maas_configured?: boolean;
+  maas_key_hint?: string | null;
 }
 
 export const userKeysApi = {
@@ -78,6 +80,10 @@ export const userKeysApi = {
 
   /** 吊销一把 Key */
   revoke: (keyId: string) => metaPost<{ ok: boolean }>('user-key/revoke', { key_id: keyId }),
+
+  /** 设置 / 清除该 sk-mem 绑定的 MaaS API Key（空串 = 清除） */
+  setMaasKey: (data: { key_id: string; maas_api_key: string }) =>
+    metaPost<{ ok: true }>('user-key/maas-key/set', data),
 };
 
 // ========================= User Config（meta/config/user/*）=========================

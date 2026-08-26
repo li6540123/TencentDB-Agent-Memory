@@ -28,6 +28,7 @@ import { matchWhitelistEndpoint, type WhitelistEndpoint } from "./routes/whiteli
 import { joinUrl } from "./guard-adapter.js";
 import { log } from "./report/log.js";
 import { verifyUserKey } from "./auth.js";
+import { resolveEffectiveUpstreamApiKeyWithMaas } from "./upstream/maas-key.js";
 import { matchSystemUserByUserId, hasSystemUsers } from "./systemUser.js";
 import { handleSystemUserPassthrough } from "./systemUserPassthrough.js";
 
@@ -57,8 +58,9 @@ const SKIP_RESPONSE_HEADERS = new Set([
  */
 function buildAuxUpstreamHeaders(
   c: Context,
-  config: ProxyConfig,
+  _config: ProxyConfig,
   entry: WhitelistEndpoint,
+  effectiveApiKey: string,
 ): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const [k, v] of c.req.raw.headers.entries()) {
@@ -68,12 +70,12 @@ function buildAuxUpstreamHeaders(
   }
   headers["content-type"] = headers["content-type"] ?? "application/json";
 
-  if (config.upstream.apiKey) {
+  if (effectiveApiKey) {
     if (entry.protocol === "anthropic") {
-      headers["x-api-key"] = config.upstream.apiKey;
+      headers["x-api-key"] = effectiveApiKey;
       delete headers["authorization"];
     } else {
-      headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
+      headers["authorization"] = `Bearer ${effectiveApiKey}`;
       delete headers["x-api-key"];
     }
   }
@@ -210,11 +212,24 @@ export async function handleAuxiliaryEndpoint(
   const bodyText = new TextDecoder().decode(rawBody);
   const modelId = extractModelId(bodyText);
 
+  const pathParts = c.req.path.split("/").filter(Boolean);
+  const agentFromPath =
+    pathParts[0] && !["v1", "proxy", "skill-bridge", "memory-bridge", "dsh"].includes(pathParts[0])
+      ? pathParts[0]
+      : undefined;
+
+  const effectiveApiKey = await resolveEffectiveUpstreamApiKeyWithMaas({
+    inboundSkMem: apiKey,
+    config,
+    agentName: agentFromPath,
+    spaceId,
+  });
+
   // 3. 拼接 upstream URL（复用 joinUrl，天然消费白名单表）
   const upstreamUrl = joinUrl(config.upstream.url, c.req.path);
 
   // 4. 构造上游请求头（按端点协议注入鉴权）
-  const upstreamHeaders = buildAuxUpstreamHeaders(c, config, entry);
+  const upstreamHeaders = buildAuxUpstreamHeaders(c, config, entry, effectiveApiKey);
 
   // 5. Pipeline log（简化：只发关键事件）
   const pipe = createPipeline(config, traceId, modelId);
