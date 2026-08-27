@@ -1,6 +1,6 @@
 # Agent Team Memory 自托管高可用方案说明
 
-> **文档用途：** 提交领导审阅的建设方案（现状、服务关系、依赖、组件替换、水平扩展与部署路径）  
+> **文档用途：** 自托管高可用建设方案说明（现状、服务关系、依赖、组件替换、水平扩展与实施路径）  
 > **建设分支：** `feat/selfhosted-ha-oceanbase`  
 > **范围说明：** 本文描述 **selfhosted-ha** 新部署体系；审批通过后再实施，与现有单机试用环境并行，互不影响。
 >
@@ -20,7 +20,7 @@ Agent Team Memory（以下简称 **ATM**）基于开源 TencentDB Agent Memory �
 |------|------|
 | **应用水平扩展** | Proxy、Core、Hub 均可按负载增加副本，前接负载均衡 |
 | **组件公司化替换** | 用 **OceanBase 4.4.2**、**Redis**、**共享文件存储（NFS）** 替代 MongoDB / TCVDB / COS |
-| **部署形态可选** | 一期：**单机 Docker 多副本**验证；二期：**Kubernetes** 生产部署 |
+| **建设周期** | **5 个工作日** 完成 P0–P6 交付（见 **§8.5**）；OB 测试库、Redis 须在开工前就绪 |
 | **单实例业务** | 固定 `instance_id=default`，一套库 `agent_team_memory`；多 Team 靠行级字段隔离 |
 
 ---
@@ -337,6 +337,68 @@ flowchart LR
 | **共享文件存储** | L2/L3 记忆正文、Skill 资源、Git 仓库与索引产物 | 一期本机盘 → 二期 **NFS** |
 | **LLM 网关** | Embedding、摘要、对话 | 公司现有 OpenAI 兼容网关（不变） |
 
+### 4.4 Core 部署模式（`deployMode`）选型
+
+ATM Core 通过配置项 **`deployMode`** 决定 **存储与进程内接线方式**（不是简单换一个数据库驱动）。产品官方仅有 **Standalone**、**Service** 两种；selfhosted-ha 建议新增第三种 **`selfhosted`**，或在实现阶段等价于 **「Standalone 接线 + OB/Redis 扩展」**（见下表方案 B）。
+
+#### 4.4.1 代码里实际是「两条整机接线」，不是统一插件总线
+
+```mermaid
+flowchart TB
+  subgraph ST [Standalone 接线 · 现网与 selfhosted 目标均走此路]
+    ST1[TdaiCore 直连 Store]
+    ST2[LocalStorage 本地盘 / NFS]
+    ST3[instance 默认 default]
+  end
+
+  subgraph SV [Service 接线 · 腾讯云专用]
+    SV1[integrations 私有子模块]
+    SV2[StorePool + TCVDB]
+    SV3[COS 文件 + 多 instance 路由]
+  end
+
+  API[HTTP API 相同] --> ST
+  API --> SV
+```
+
+**读图：** 扩展点（metadata / memory / skill **接口**）存在，但被包在上述两套接线里。**selfhosted 复用 Standalone 接线**，替换接口背后的 OB 实现；**不**走 Service 的 TCVDB/COS/integrations 链路。
+
+#### 4.4.2 三种官方/目标模式对照
+
+| 维度 | **Standalone** | **Service（官方）** | **selfhosted（目标）** |
+|------|----------------|---------------------|------------------------|
+| **定位** | 单机自托管、SQLite | 腾讯云 SaaS、多副本多 instance | 公司自托管、可水平扩展 |
+| **metadata** | SQLite | MongoDB | **OceanBase** |
+| **向量 / Skill** | SQLite | TCVDB | **OceanBase VECTOR** |
+| **L2/L3 文件** | 本地盘 | COS | **NFS** |
+| **锁 / 队列** | 默认进程内；可配 Redis | Redis | **Redis（必须）** |
+| **Gateway 接线** | TdaiCore + 本地存储 | StorePool + integrations + COS | **同 Standalone** |
+| **instance** | 通常 `default` | 多 `x-tdai-service-id` | **固定 `default`（本期）** |
+| **公司能否直接用** | 现网分片在用 | ❌ 缺私有模块 + 腾讯组件 | ✅ 目标形态 |
+
+#### 4.4.3 实现路径对比（为何不在 Service 上改）
+
+| 方案 | 做法 | 主要工作量 | 风险 |
+|------|------|------------|------|
+| **A. 新增 `deployMode: selfhosted`** | Standalone 接线 + OB adapter + 启动校验 | **P2/P3 adapter** + 少量 mode/校验代码 | 低；语义清晰 |
+| **B. 继续 `standalone` + 换 backend 配置** | 不增 enum，yaml 指定 mysql/obvector/redis | **与 A 相同的 adapter**；少写 enum | 中；名为 standalone 易与 SQLite 单机混淆 |
+| **C. 在 `service` 模式上改** | 把 Mongo/TCVDB/COS 换成 OB/NFS | adapter **+** 拆除 integrations/Shark/多 instance/COS 整条链路 | **高**；与官方 Service 语义冲突 |
+
+**结论（建议方案 A 或 B，等价实现）：**
+
+- **不在官方 Service 上叠加实现**——Service 绑定 integrations 子模块、MongoDB、TCVDB、COS，与公司环境不符，改动面大于新增存储 adapter。
+- **主要研发在扩展点（P2–P4）**：实现 metadata / memory / skill / Hub 的 **OceanBase 适配器**；与是否新增 enum **工作量同级**。
+- **新增 mode 的增量**主要是：配置解析、启动校验（OB 必填、Redis 必填、禁止 SQLite metadata 混用），**不是**第三条完整 Gateway 链路。
+
+```text
+selfhosted  ≈  Standalone 进程接线
+              +  metadata / memory / skill → OceanBase 适配器（P2/P3）
+              +  stateBackend = redis（P3）
+              +  文件仍 LocalStorage → NFS（P5）
+```
+
+技术细节见 [ARCHITECTURE.md §4](./ARCHITECTURE.md#4-deploymode-selfhosted)、[实施计划 P2/P3](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md)。
+
 ---
 
 ## 五、目标态：服务调用与依赖关系
@@ -540,19 +602,63 @@ flowchart LR
 
 **Docker 与 K8s 拓扑一致：** 仅编排方式不同，服务划分、依赖、存储连接 **不变**。
 
-### 8.4 研发分期（与部署对应）
+### 8.4 研发任务（P0–P6）
 
-| 阶段 | 研发内容 | 部署能力 |
-|------|----------|----------|
-| **P0** | compose / nginx / 文档骨架 | 单副本跑通 |
-| **P1** | Proxy 多副本 | Proxy×2 + Redis |
-| **P2** | Core metadata → OB | Core×1，OB 元数据 |
+| 阶段 | 研发内容 | 目标部署能力 |
+|------|----------|--------------|
+| **P0** | compose / nginx / 脚本骨架 | 单副本栈可启动 |
+| **P1** | Proxy 多副本 | Proxy×2 + Redis 会话 |
+| **P2** | Core metadata → OB | 用户/Team/Key 进 OB |
 | **P3** | Core 向量 + Skill + Redis 锁 | **Core×2** |
 | **P4** | Hub knowledge.db → OB | **Hub×2** |
-| **P5** | NFS 文件切换 | 多副本共享文件 |
-| **P6** | K8s manifests + 多机说明 | 生产 K8s |
+| **P5** | 共享文件目录（本机共享盘或 NFS） | Core/Hub 多副本共享 L2/L3、Git |
+| **P6** | K8s manifests 初版 | 与 Compose 等价拓扑 |
 
-详细任务见 [`2026-08-26-selfhosted-ha-oceanbase.md`](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md)；技术审查见 [`REVIEW.md`](./REVIEW.md)。
+任务拆解见 [实施计划](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md)；审查见 [`REVIEW.md`](./REVIEW.md)。
+
+### 8.5 建设周期（5 个工作日）
+
+**总工期：5 个工作日。** P0–P6 在同一周内 **并行推进**（Compose 验证为主，K8s  manifest 同步产出），不按多周分期。
+
+#### 开工前置（D0，不计入 5 日）
+
+| 项 | 要求 |
+|----|------|
+| OceanBase | 测试库 **`agent_team_memory`** 已建；账号具备 DDL 与 `DBMS_HYBRID_SEARCH` |
+| Redis | 测试实例可用 |
+| Embedding | 模型与向量维度已确认（用于 `VECTOR(n)` DDL） |
+| 环境 | 1～2 名研发 + 测试机 Docker Compose；与现网 **并行**，不割接 |
+
+#### 五日计划
+
+| 日 | 并行任务 | 当日验收 |
+|:--:|----------|----------|
+| **D1** | **P0** compose / nginx / `up.sh`；**P1** Proxy×2 + Redis；OB/Redis 环境变量接入 | 双 Proxy 经 nginx 接入；重启单 Proxy 会话不丢 |
+| **D2** | **P2** metadata → OB（adapter + DDL + 合约测试）；启动 **P3** 向量表 DDL | Panel 建用户/Team 写入 OB |
+| **D3** | **P3** 向量 + Skill store + Redis 锁；**nginx-core**；**Core×2** | 双 Core 读写一致；Pipeline 锁生效 |
+| **D4** | **P3** 收尾（`entity_knowledge`、迁移脚本）；**P4** Hub 引擎表迁 OB；**Hub×2** | Hub 双副本可读；CodeGraph 构建不重复（Redis 锁） |
+| **D5** | **P5** NFS 共享目录挂载；**P6** K8s manifest；全链路回归 | Proxy×2 / Core×2 / Hub×2 + OB + Redis + NFS 联调通过 |
+
+```mermaid
+flowchart LR
+  D1[D1 部署+P1] --> D2[D2 P2 metadata]
+  D2 --> D3[D3 P3 Core×2]
+  D3 --> D4[D4 P4 Hub×2]
+  D4 --> D5[D5 P5 文件+P6 K8s]
+```
+
+#### 一周内交付范围
+
+| 能力 | 5 日末 |
+|------|:------:|
+| Proxy ×2 + nginx | ✅ |
+| Core ×2 + nginx-core | ✅ |
+| Hub ×2 + nginx-hub | ✅ |
+| metadata / 向量 / Skill → OB | ✅ |
+| Hub 引擎表 → OB | ✅ |
+| Redis 锁与会话 | ✅ |
+| 共享文件（NFS） | ✅ |
+| K8s manifest（与 Compose 同拓扑） | ✅ |
 
 ---
 

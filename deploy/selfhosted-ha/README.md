@@ -4,7 +4,7 @@
 
 | 文档 | 读者 | 内容 |
 |------|------|------|
-| **[PROPOSAL.md](./PROPOSAL.md)** | 领导 / 产品 | 现状、目标、组件替换、部署路径、风险摘要 |
+| **[PROPOSAL.md](./PROPOSAL.md)** | 方案说明 | 现状、目标、组件替换、部署路径、风险摘要 |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 研发 / 架构 | 目标拓扑、数据分层、配置、迁移与扩展约束 |
 | [REVIEW.md](./REVIEW.md) | 研发 | 审查结论、P2–P4 边界、代码就绪度、风险矩阵 |
 | [实施计划 P0–P6](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md) | 研发 | 任务拆解、验收标准、工期参考 |

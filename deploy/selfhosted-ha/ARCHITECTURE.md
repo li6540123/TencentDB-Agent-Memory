@@ -1,7 +1,7 @@
 # 自托管高可用技术架构（OceanBase 4.4.2 + Redis）
 
 > **分支：** `feat/selfhosted-ha-oceanbase`  
-> **领导方案：** [PROPOSAL.md](./PROPOSAL.md)（现状、目标、审批用）  
+> **方案说明：** [PROPOSAL.md](./PROPOSAL.md)（现状、目标、阶段划分）  
 > **实施计划：** [2026-08-26-selfhosted-ha-oceanbase.md](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md)  
 > **审查报告：** [REVIEW.md](./REVIEW.md)
 
@@ -409,7 +409,7 @@ selfhosted-ha **新栈与现网分片并行**，审批通过后再切流量；�
 
 ```text
 deploy/selfhosted-ha/
-├── PROPOSAL.md              ← 领导审批
+├── PROPOSAL.md              ← 建设方案说明
 ├── ARCHITECTURE.md          ← 本文
 ├── REVIEW.md
 ├── README.md
