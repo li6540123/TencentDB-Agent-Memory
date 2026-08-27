@@ -312,6 +312,4 @@ npm test -- metadata-store.contract   # mysql adapter 通过
 - [`deploy/internal-team/`](../../deploy/internal-team/) — 单机 Standalone 模板
 - [`MemoryCore/src/metadata/store/interface.ts`](../../MemoryCore/src/metadata/store/interface.ts)
 - [`MemoryCore/src/core/store/sqlite.ts`](../../MemoryCore/src/core/store/sqlite.ts) — P3 移植源
-- [已废弃 PG 方案](./2026-08-26-selfhosted-ha-postgres-pgvector.md)
-
 **文档版本：** 2026-08-27 · 与 PROPOSAL / ARCHITECTURE 对齐

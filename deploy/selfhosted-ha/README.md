@@ -47,5 +47,3 @@ TDAI_DATA_DIR=/data/tdai/core
 | 向量 | `VECTOR` 列、`VECTOR INDEX`、可执行 `DBMS_HYBRID_SEARCH` |
 | 字符集 | utf8mb4 |
 | Embedding 维度 | 与模型一致（建表 `VECTOR(n)` 用） |
-
-**已废弃：** PostgreSQL + pgvector 方案见 [`2026-08-26-selfhosted-ha-postgres-pgvector.md`](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-postgres-pgvector.md)（仅作历史参考）。
