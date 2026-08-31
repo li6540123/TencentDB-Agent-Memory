@@ -1,698 +1,356 @@
 # Agent Team Memory 自托管高可用方案说明
 
-> **文档用途：** 自托管高可用建设方案说明（现状、服务关系、依赖、组件替换、水平扩展与实施路径）  
-> **建设分支：** `feat/selfhosted-ha-oceanbase`  
-> **范围说明：** 本文描述 **selfhosted-ha** 新部署体系；审批通过后再实施，与现有单机试用环境并行，互不影响。
->
-> **飞书文档用法：** 架构图均为 **Mermaid 流程图**。粘贴到飞书时：在代码块语言选 **`Mermaid`**（若文档支持），或先用 [mermaid.live](https://mermaid.live) 导出 PNG/SVG 再插入飞书。
-
----
-
 ## 一、建设背景与目标
 
 ### 1.1 背景
 
-Agent Team Memory（以下简称 **ATM**）基于开源 TencentDB Agent Memory 二开，包含记忆注入 **Proxy**、记忆 **Core**、管理 **Panel** 与 **Knowledge Hub**。产品代码通过 **`deployMode`** 支持 **Standalone** 与 **Service** 两种官方形态（详见 **§2.1**）。公司现网为 **Standalone 多实例分片**（1 Hub + 多套 Proxy–Core，详见 **§2.6**），单套 Core 仍无法水平扩展，且 **不能使用** Service 所依赖的 MongoDB / TCVDB / COS，因此建设 **selfhosted-ha**：在自托管路线上用 **OceanBase + Redis + NFS** 实现可扩展部署。
+Agent Team Memory（以下简称 **ATM**）是 Agent 的 **记忆与知识平台**：Agent 通过 **接入代理（Proxy）** 使用记忆与对话能力，**记忆核心（Core）** 存用户与记忆数据，**管理控制台（Panel）** 做注册与管理，**知识服务（Knowledge）** 提供 Wiki / 代码图谱。
+
+当前每增加一条业务线，往往 **再部署一套 Proxy + Core**；单套 **不能加机器扩容**，数据也落在各自容器里，运维成本高。腾讯云官方方案又依赖 MongoDB、云向量库、对象存储等，**不符合**公司中间件要求。
+
+```mermaid
+flowchart TB
+  subgraph row1 [业务线 1]
+    direction LR
+    L1[业务] --> S1[Proxy + Core 一套]
+  end
+  subgraph row2 [业务线 2]
+    direction LR
+    L2[业务] --> S2[Proxy + Core 一套]
+  end
+```
+
+因此建设 **自托管高可用方案（selfhosted-ha）**：统一到公司 **OceanBase、Redis、共享文件存储**，业务增长时 **给各模块加副本** 即可；管理台与知识服务也可 **单独发布、单独扩容**。
 
 ### 1.2 建设目标
 
 | 目标 | 说明 |
 |------|------|
-| **应用水平扩展** | Proxy、Core、Hub 均可按负载增加副本，前接负载均衡 |
+| **应用水平扩展** | Proxy、Core、Panel、Knowledge 均可按负载增加副本，前接负载均衡 |
 | **组件公司化替换** | 用 **OceanBase 4.4.2**、**Redis**、**共享文件存储（NFS）** 替代 MongoDB / TCVDB / COS |
-| **建设周期** | **5 个工作日** 完成 P0–P6 交付（见 **§8.5**）；OB 测试库、Redis 须在开工前就绪 |
-| **单实例业务** | 固定 `instance_id=default`，一套库 `agent_team_memory`；多 Team 靠行级字段隔离 |
+| **统一平台、模块可独立运维** | 全公司共用 **一套 ATM**（一套库、一套共享目录）；管理控制台与知识服务 **分开发布、分开扩缩**，便于接入公司流水线；多团队在平台内隔离，不必再拆多套互不共享的记忆环境 |
 
 ---
 
-## 二、现状：部署模式、服务与依赖
+## 二、现状
 
-ATM 在代码里通过 Core 配置项 **`deployMode`** 区分两种官方部署模式。二者 **共用同一套应用**（Proxy、Core、Hub）和 **同一套 HTTP API**，差异主要在 **存什么库、能否多副本、是否多 instance**。
+### 2.1 部署拓扑
 
-### 2.1 两种部署模式一览
+当前采用 **1 个管理面（Panel，常与 Knowledge 合并）+ N 组 Proxy–Core**（每组 1 Proxy 固定连 1 台单机 Core）：
 
-| 维度 | **Standalone（单机自托管）** | **Service（云服务化）** |
-|------|------------------------------|-------------------------|
-| **配置** | `deployMode: standalone` | `deployMode: service` |
-| **设计定位** | 本地开发、Docker 一体化、离线/内网单机 | K8s 多副本、多租户 SaaS、腾讯云托管 |
-| **用户/Team/Key（metadata）** | Core **SQLite** 文件 | **MongoDB** |
-| **L0/L1 向量、Skill 向量** | Core **SQLite**（vectors.db） | **腾讯云向量库 TCVDB** |
-| **L2/L3、Skill 正文文件** | Core **本地磁盘** | **COS 对象存储** |
-| **Pipeline 锁、Skill 队列** | 默认 **进程内 local**；可配 Redis | **Redis**（分布式锁 + 队列） |
-| **Proxy 会话** | **Redis**（多 Proxy 副本时需要） | **Redis** |
-| **Hub Knowledge 引擎库** | Hub **SQLite**（knowledge.db） | 同左（Hub 侧仍为 SQLite 文件） |
-| **instance_id** | 通常固定 **`default`** | 请求头 **`x-tdai-service-id`**，可多套并行 |
-| **Core 水平扩展** | **不支持**（SQLite + local 锁） | **支持**（共享 TCVDB/COS/Redis） |
-| **典型外部依赖** | LLM 网关；可选 Redis | LLM + **MongoDB + TCVDB + COS + Redis** |
+| 项目 | 说明 |
+|------|------|
+| **每套 Core** | `deployMode: standalone`；独立 SQLite + 本地 Volume，**单机、不能加副本** |
+| **拓扑** | **1 个管理入口**（Panel，常与 Knowledge 同机合并）+ **N 组 Proxy–Core** |
+| **分组方式** | 每组 Proxy 配独立 `serviceId`；Panel 用 `metadata-instances.json` 指向不同 Core |
+| **扩容方式** | 新业务线 ≈ **再部署一套 Proxy + Core**；无法在现有 Core 上直接加副本 |
+| **Panel 与 Core** | Panel **无**独立用户库；用户 / Team / Agent 管理面数据 **全部走 Core** |
 
 ```mermaid
 flowchart TB
-  subgraph APP [应用层 · 两种模式相同]
-    direction LR
-    PX[Proxy]
-    CX[Core]
-    HX[Hub]
-  end
+  H[Panel / Knowledge]
+  P1[Proxy A]
+  C1[Core A · 单机]
+  P2[Proxy B]
+  C2[Core B · 单机]
 
-  subgraph SA [Standalone 存储]
-    direction TB
-    S1[(Core SQLite<br/>metadata + 向量)]
-    S2[Core 本地盘]
-    S3[(Hub SQLite)]
-  end
-
-  subgraph SV [Service 存储]
-    direction TB
-    V1[(MongoDB)]
-    V2[(TCVDB)]
-    V3[(COS)]
-  end
-
-  subgraph SH [两种模式共用]
-    direction LR
-    R[(Redis)]
-    L[LLM 网关]
-  end
-
-  APP --> SA
-  APP --> SV
-  APP --> SH
+  H -->|管理 A| C1
+  H -->|管理 B| C2
+  P1 -->|serviceId A| C1
+  P2 -->|serviceId B| C2
 ```
 
-> 读图：应用拓扑不变；**换 deployMode = 换 Core 背后存储**。Standalone 走左侧 SQLite/本地盘，Service 走右侧 MongoDB/TCVDB/COS；两种模式 **不会同时** 使用两套 Core 存储。
+> 这是 **物理上多套单机** 叠在一起，**不是** 官方 Service 那种「一套 Core 集群 + 共享云存储」。Panel 与 Knowledge 现状多为 **合并镜像**，目标态拆成独立服务。
 
-### 2.2 应用服务（两种模式共用）
+### 2.2 存什么、放哪
 
-| 服务 | 职责 | 典型端口 |
-|------|------|----------|
-| **Memory Proxy** | Agent/IDE 入口；会话、记忆注入、转发 LLM | 8096 |
-| **Memory Core** | 记忆 L0–L3、Skill、用户/Team/Agent 元数据 API | 8420 |
-| **Memory Hub** | Panel 管理台 + Knowledge（Wiki/CodeGraph 引擎） | 8125 / 8424 |
-| **Redis** | Proxy 会话；Service 模式下 Core 锁/队列 | 6379 |
-
-### 2.3 服务调用与外部依赖
-
-**应用间调用**（两种模式相同）
-
-```mermaid
-flowchart TB
-  A[CLI / Agent]
-  B[浏览器]
-  P[Proxy :8096]
-  H[Hub :8125/8424]
-  C[Core :8420]
-
-  A -->|记忆 / Skill| P
-  B -->|Panel| H
-  P -->|元数据 / 记忆| C
-  H -->|用户 / Team / Agent| C
-  A -.->|Wiki / CodeGraph| H
-```
-
-| 调用方 | 目标 | 说明 |
-|--------|------|------|
-| CLI / Agent | Proxy | 记忆注入、Skill、转发 LLM |
-| Proxy | Core | 元数据、L0–L3 记忆 |
-| 浏览器 | Hub | Panel 管理界面 |
-| Hub | Core | 用户 / Team / Agent（Hub **无**独立用户库） |
-| CLI / Agent | Hub | 查询 Wiki / CodeGraph |
-
-**外部依赖**（随 `deployMode` 变化；下图分别列出 **谁连什么、干什么**）
-
-*Standalone*
+每套 Core / Panel+Knowledge 各自一份本地数据：
 
 ```mermaid
 flowchart TB
   P[Proxy]
   C[Core]
-  H[Hub]
+  H[Panel / Knowledge]
 
   R[(Redis)]
-  L[LLM 网关]
-  CS[(Core SQLite<br/>metadata + vectors)]
+  UGW[用户 MaaS 网关]
+  PGW[平台公共 LLM 网关]
+  CS[(Core SQLite<br/>metadata + 向量)]
   CD[Core 本地盘<br/>L2/L3 · Skill 文件]
-  HS[(Hub SQLite<br/>knowledge.db)]
-  HD[Hub 本地盘<br/>Git · 索引]
+  HS[(Knowledge SQLite<br/>knowledge.db)]
+  HD[Knowledge 本地盘<br/>Git · 索引]
 
   P -->|会话| R
-  P -->|转发 Agent 对话| L
+  P -->|Agent 对话| UGW
   C -->|用户 / Team / 向量 / 注册表| CS
   C -->|L2/L3 · Skill 正文| CD
-  C -->|Pipeline · Embedding · 生成| L
+  C -->|Pipeline · Embedding| PGW
   H -->|Wiki / CodeGraph 任务| HS
   H -->|仓库与索引产物| HD
-  H -->|Embedding · 生成| L
+  H -->|Embedding · 构建| PGW
 ```
-
-*Service*
-
-```mermaid
-flowchart TB
-  P[Proxy]
-  C[Core]
-  H[Hub]
-
-  R[(Redis)]
-  L[LLM 网关]
-  M[(MongoDB)]
-  V[(TCVDB)]
-  COS[(COS)]
-  HS[(Hub SQLite)]
-  HD[Hub 本地盘]
-
-  P -->|会话| R
-  P -->|转发 Agent 对话| L
-  C -->|metadata| M
-  C -->|L0/L1 · Skill 向量 · 注册表| V
-  C -->|L2/L3 · Skill 正文| COS
-  C -->|Pipeline 锁 · Skill 队列| R
-  C -->|Pipeline · Embedding · 生成| L
-  H -->|Wiki / CodeGraph 任务| HS
-  H -->|仓库与索引产物| HD
-  H -->|Embedding · 生成| L
-```
-
-| 组件 | Standalone 依赖 | Service 依赖 | 用途 |
-|------|-----------------|--------------|------|
-| **Proxy** | Redis、LLM | Redis、LLM | 会话状态；转发 Agent 对话 |
-| **Core** | SQLite、本地盘、LLM；（锁默认进程内） | MongoDB、TCVDB、COS、Redis、LLM | 元数据、向量、文件、Pipeline |
-| **Hub** | Hub SQLite、本地盘、LLM | 同左 | Wiki/CodeGraph 任务与产物（Hub 不连 Mongo/TCVDB） |
-
-### 2.4 Standalone 模式：存什么、放哪
 
 | 数据 | 存储 | 说明 |
 |------|------|------|
 | 用户 / Team / API Key | Core **SQLite**（metadata） | 单文件，随容器 Volume |
 | L0/L1 向量、Skill 向量 | Core **SQLite**（vectors.db） | 含 vec0 向量索引 |
-| Knowledge **注册表** | Core vectors.db 内 `entity_knowledge` | service_url 等，非 Hub 引擎库 |
+| Knowledge **注册表** | Core vectors.db 内 `entity_knowledge` | service_url 等，非 Knowledge 引擎库 |
 | L2/L3、Skill 正文 | Core **本地目录** | jsonl / md / 资源文件 |
-| Hub Wiki/CodeGraph **任务状态** | Hub **SQLite**（knowledge.db） | 同步进度、审计 |
-| Git 仓库、索引产物 | Hub **本地目录** | 不进 SQLite |
+| Wiki/CodeGraph **任务状态** | Knowledge **SQLite**（knowledge.db） | 同步进度、审计 |
+| Git 仓库、索引产物 | Knowledge **本地目录** | 不进 SQLite |
 | 会话 | **Redis** | Proxy 使用 |
 | Pipeline 锁、Skill 队列 | 默认 **local**（进程内） | 多 Core 副本会冲突 |
+| Agent 对话算力 | **用户 MaaS 网关** | 经 Proxy，按身份 Key 绑定 |
+| 服务内部算力 | **平台公共 LLM 网关** | Core Pipeline / Embedding；Knowledge 构建 |
 
-**特点：** 外部依赖少，**一条命令可起 Core**；但 metadata/向量/Hub 库都在 **单机文件** 里，**Core/Hub 不能安全多副本**。
+### 2.3 主要瓶颈
 
-### 2.5 Service 模式：存什么、放哪
+| 瓶颈 | 原因 |
+|------|------|
+| **Core / Knowledge 不能加副本** | SQLite + 进程内锁，多进程写会冲突 |
+| **文件不共享** | L2/L3、Git 在容器 Volume，跨节点无法共用 |
+| **扩业务线只能加「套数」** | 再部署一套 Proxy–Core，运维与数据面成倍增加 |
+| **无法直接用官方 Service** | 依赖 MongoDB / TCVDB / COS 与私有 integrations，公司环境不满足 |
 
-| 数据 | 存储 | 说明 |
+### 2.4 与官方两种模式的关系（对照）
+
+产品代码里 `deployMode` 只有两种官方形态；**当前部署属于 Standalone（多套物理叠加）**，不是 Service。
+
+| 维度 | **Standalone** | **Service（官方云模式）** | **当前部署** |
+|------|----------------|---------------------------|--------------|
+| 配置 | `deployMode: standalone` | `deployMode: service` | Standalone |
+| metadata | SQLite | MongoDB | SQLite |
+| 向量 | SQLite | TCVDB | SQLite |
+| 文件 | 本地盘 | COS | 本地盘 |
+| Core 多副本 | ❌ | ✅（共享远程存储） | ❌（每套单机） |
+| 典型依赖 | LLM；可选 Redis | LLM + Mongo + TCVDB + COS + Redis | LLM + Redis |
+
+> **为何不改用 Service：** 缺腾讯云组件与私有子模块；selfhosted-ha 在自托管路线上用 OB + Redis + NFS 达成「可扩副本」。
+
+---
+
+## 三、设计方案
+
+### 3.1 方案概要
+
+本章说明目标架构下的 **系统关系、部署形态与改造项**，落实第一章建设目标。核心设计选择如下：
+
+| 维度 | 选择 |
+|------|------|
+| **存储** | 全公司共用 OB 库 `agent_team_memory`、NFS `/data/tdai`；替代现状多套 SQLite / 本地盘 |
+| **模块** | Proxy、Core、Panel、Knowledge 四模块；Panel 与 Knowledge 从合并镜像 **拆分** |
+| **发布** | 各模块独立制品，经 **公司流水线** 构建发布，域名接入 |
+| **扩展** | 各模块可按负载 **加副本**，共享 OB / Redis / NFS |
+| **算力** | Agent 对话经 Proxy 走 **用户 MaaS 网关**；Core / Knowledge 内部 Embedding、构建等走 **平台公共网关** |
+| **实现路径** | Standalone 接线 + OB / Redis 适配；**不走**官方 Service |
+
+产品侧固定环境标识 **`default`**。
+
+### 3.2 系统架构
+
+**调用关系**
+
+```mermaid
+flowchart TB
+  A[CLI / Agent]
+  B[浏览器]
+  P[Proxy]
+  PL[Panel]
+  KS[Knowledge]
+  C[Core]
+
+  A -->|记忆 / Skill / 对话| P
+  B -->|管理台| PL
+  P -->|元数据 / 记忆| C
+  PL -->|用户 / Team / Agent / Knowledge 注册| C
+  A -->|Wiki / CodeGraph| KS
+  PL -.->|配置 Knowledge service_url| KS
+```
+
+| 路径 | 说明 |
+|------|------|
+| Agent → Proxy → Core | 记忆注入、Skill、会话；会话态在 Redis |
+| 浏览器 → Panel → Core | 管理面；Panel **无**独立用户库 |
+| Agent → Knowledge | Wiki / CodeGraph；引擎表在 OB，Git/索引在 NFS |
+| Panel → Knowledge | Panel 登记 Knowledge 时写入 Core 注册表（含 `service_url` 指向 Knowledge） |
+
+**算力与网关**
+
+Agent **对话**走 Proxy，可按用户绑定 **各自的** 公司 MaaS 网关 Key（客户端只配 Proxy 地址与身份 Key）。  
+Core、Knowledge 等 **服务内部任务**（记忆 Pipeline、向量 Embedding、Wiki / CodeGraph 构建等）统一走 **平台公共** LLM 网关，与用户个人 Key 无关。
+
+| 场景 | 算力 | 说明 |
 |------|------|------|
-| 用户 / Team / API Key | **MongoDB** | 按 `instance_id` 分库；Core 启动校验必填 |
-| L0/L1 向量、Skill 向量 | **TCVDB** | 远程向量服务；`storeBackend: tcvdb` |
-| L2/L3、Skill 正文 | **COS** | 按 instance 路径隔离 |
-| Knowledge 注册表 | **TCVDB**（与向量同套 store） | 与 Standalone 逻辑等价，介质不同 |
-| Hub 引擎库 / Git 文件 | 仍多为 **Hub 本地 SQLite + 盘** | 全栈部署时与 Standalone 类似 |
-| 锁 / 队列 / 会话 | **Redis** | Core 多副本前提 |
-
-**特点：** 为 **多副本、多 instance** 设计；依赖 **腾讯云 MongoDB / TCVDB / COS**（及 Redis），且 Core 需 **`src/integrations/` 私有子模块** 才能完整启动，**不符合**公司「只用 OB + Redis + NFS」约束。
-
-### 2.6 公司当前部署形态
-
-现网采用 **Standalone 多实例分片**——底层仍是 §2.4 的单机 Standalone，**不是** §2.5 的 Service 模式，也**不是**官方「单 Core 集群内按 `x-tdai-service-id` 路由」。
-
-| 项目 | 说明 |
-|------|------|
-| **每套 Core** | `deployMode: standalone`；独立 SQLite + 本地 Volume，**单机、不可多副本** |
-| **拓扑** | **1 个 Hub**（Panel 统一入口）+ **N 组 Proxy–Core**（每组 1 Proxy 固定连 1 Core） |
-| **serviceId / instance** | 每组 Proxy 配 **独立 `serviceId`**；Hub 用 `metadata-instances.json` 注册多个 instance，分别指向不同 Core 地址 |
-| **扩容方式** | 新业务线 ≈ **再部署一套 Proxy + Core**；无法在现有 Core 上直接加副本 |
-| **与 Service 区别** | 虽有多 `serviceId`，但 **未使用** MongoDB / TCVDB / COS，也 **未共享** Core 集群 |
+| Agent 对话（经 Proxy 转发） | **用户自有** | 每人 / 每把身份 Key 可绑不同 MaaS Key |
+| Core 记忆 Pipeline、Embedding | **平台公共** | 服务级配置；写入向量、记忆抽取等 |
+| Knowledge Wiki / CodeGraph 构建 | **平台公共** | 服务级配置；索引与 Embedding |
+| Panel 管理面（如有 LLM 调用） | **平台公共** | 与用户对话路径无关 |
 
 ```mermaid
 flowchart TB
-  H[Hub x 1]
-  P1[Proxy A]
-  C1[Core A · Standalone]
-  P2[Proxy B]
-  C2[Core B · Standalone]
+  A[Agent / IDE]
+  P[Proxy]
+  C[Core]
+  K[Knowledge]
+  UGW[用户 MaaS 网关]
+  PGW[平台公共 LLM 网关]
 
-  H -->|Panel 管 instance A| C1
-  H -->|Panel 管 instance B| C2
-  P1 -->|serviceId A| C1
-  P2 -->|serviceId B| C2
+  A -->|对话| P
+  P -->|转发| UGW
+  C -->|Embedding · Pipeline| PGW
+  K -->|Embedding · 构建| PGW
 ```
 
----
+**数据落点**
 
-## 三、多套 instance 是做什么的？为何本期只做单实例
-
-### 3.1 产品里的 instance 是什么
-
-ATM 代码里有一级概念 **`instance_id`**（HTTP 头 `x-tdai-service-id`，Proxy 路径如 `/claude-code/{instance_id}`）。它表示 **一套独立的「记忆实例」**——不是 Docker 容器副本，而是 **逻辑上的多套并行部署单元**。
-
-下图是 **官方多 instance 架构示意**（本期不做；仅说明概念）：
+| 数据 | 目标存储 | 使用方 |
+|------|----------|--------|
+| 用户 / Team / API Key | OB `meta_*` | Core（Panel 经 API 读写） |
+| L0/L1、Skill 向量 | OB VECTOR | Core |
+| Knowledge 注册表（`service_url` 等） | OB `entity_knowledge` | Core |
+| Wiki / CodeGraph 引擎表 | OB `knowledge_*` | Knowledge |
+| L2/L3、Skill 文件 | NFS `/data/tdai/core` | Core |
+| Git 仓库、索引产物 | NFS `/data/tdai/hub/knowledge` | Knowledge；路径中 `hub` 为代码目录约定，对应 Knowledge 模块 |
+| 会话 / 锁 / 队列 | Redis | Proxy、Core、Knowledge |
 
 ```mermaid
-%%{init: {'theme': 'neutral', 'themeVariables': {'fontSize': '15px'}}}%%
-flowchart LR
-  REQ["HTTP 请求<br/><b>x-tdai-service-id</b>"] --> ROUTE["Core 集群<br/>按 instance 路由"]
-
-  ROUTE --> D["<b>default</b><br/>metadata · 向量 · 文件"]
-  ROUTE --> A["<b>team-a</b><br/>metadata · 向量 · 文件"]
-  ROUTE --> B["<b>team-b</b><br/>metadata · 向量 · 文件"]
-
-  style REQ fill:#f8fafc,stroke:#94a3b8
-  style ROUTE fill:#e0f2fe,stroke:#0284c7
-  style D fill:#dbeafe,stroke:#2563eb
-  style A fill:#f1f5f9,stroke:#64748b
-  style B fill:#f1f5f9,stroke:#64748b
-```
-
-**读图要点：** 一个 instance = 一套独立的 metadata + 向量 + 文件；多套 instance 共用 Core 进程，靠请求头 **切到不同存储**。与 **水平扩展**（同一 instance 下加 Proxy/Core 副本）是不同维度。
-
-### 3.2 多套 instance 解决什么问题
-
-| 场景 | 说明 |
-|------|------|
-| **多业务线 / 多产品** | 同一套 Core 集群托管多套互不影响的记忆环境（如 A 产品与 B 产品） |
-| **强隔离** | 实例间数据、向量、文件完全分开，合规或租户边界清晰 |
-| **云 Service 售卖** | 腾讯云版按实例售卖给不同客户，每客户一个 instance |
-
-隔离层级在官方设计里大致为：`instance_id` → `team_id` → `agent_id` → `user_id`。
-
-### 3.3 本期为何只做单实例（`default`）
-
-| 因素 | 说明 |
-|------|------|
-| **业务需求** | 公司内 **一套 Agent Team Memory 服务** 即可；多 Team、多 Agent 用 **表内 `team_id` 等字段** 隔离，不需要再拆多套 instance |
-| **运维简化** | **一个 OB 库** `agent_team_memory`、一条连接串、一套 NFS 目录；扩应用副本 **不加库** |
-| **实施成本** | 多 instance 需按请求动态切库/切目录，适配与测试量显著增加 |
-| **与水平扩展不矛盾** | **水平扩展** = 同一 instance 下 Proxy/Core/Hub **加副本**；**多 instance** = 多套逻辑环境并行，是不同维度 |
-
-**结论：** 本期固定 **`instance_id = default`**，全力做 **组件替换 + 服务水平扩展**；若未来确有「多套记忆环境并行」需求，再单独立项做多 instance。
-
-**本期单 instance 示意（与上图对比）：**
-
-```mermaid
-%%{init: {'theme': 'neutral', 'themeVariables': {'fontSize': '15px'}}}%%
-flowchart LR
-  subgraph APP ["应用层 · 仅 default · 副本可扩展"]
-    direction TB
-    P["Proxy × N"]
-    C["Core × N"]
-    H["Hub × M"]
-    P --> C
-    H --> C
-  end
-
-  subgraph STORE ["共用一套存储"]
-    direction TB
-    OB[("OceanBase<br/>agent_team_memory")]
-    R[("Redis")]
-    F[("NFS<br/>/data/tdai")]
-  end
-
-  APP --> STORE
-
-  style APP fill:#ecfdf5,stroke:#059669
-  style STORE fill:#eff6ff,stroke:#2563eb
-```
-
----
-
-## 四、目标系统组成（selfhosted-ha）
-
-### 4.1 应用服务（需水平扩展）
-
-| 服务 | 职责 | 对外端口（示例） | 扩展前提 |
-|------|------|------------------|----------|
-| **Memory Proxy** | Agent/IDE 流量入口；会话、记忆注入、转发 LLM | 8096 | 依赖 **Redis** 存会话 |
-| **Memory Core** | 记忆读写、Skill、用户/Team 元数据 API | 8420（内网） | 依赖 **OB + Redis + 共享文件** |
-| **Memory Hub** | Panel 管理台 + Knowledge（Wiki/CodeGraph） | 8125 / 8424 | Hub 多副本需 **OB + 共享 knowledge 目录** |
-
-### 4.2 接入层（负载均衡）
-
-| 组件 | 作用 |
-|------|------|
-| **nginx-proxy** | Proxy 多副本统一入口 `:8096` |
-| **nginx-core** | Core 多副本统一入口 `:8420`（Proxy / Hub 内网调用） |
-| **nginx-hub** | Hub 多副本统一入口 `:8125` / `:8424` |
-
-### 4.3 外部与基础设施组件
-
-| 组件 | 用途 | 来源 |
-|------|------|------|
-| **OceanBase 4.4.2**（MySQL 租户） | 用户/Team/Key、记忆向量、Skill 向量、Hub 引擎元数据 | **公司已有**，库名 `agent_team_memory` |
-| **Redis** | Proxy 会话、Core 分布式锁与任务队列、Hub 构建互斥锁 | 公司中间件或部署侧 Redis |
-| **共享文件存储** | L2/L3 记忆正文、Skill 资源、Git 仓库与索引产物 | 一期本机盘 → 二期 **NFS** |
-| **LLM 网关** | Embedding、摘要、对话 | 公司现有 OpenAI 兼容网关（不变） |
-
-### 4.4 Core 部署模式（`deployMode`）选型
-
-ATM Core 通过配置项 **`deployMode`** 决定 **存储与进程内接线方式**（不是简单换一个数据库驱动）。产品官方仅有 **Standalone**、**Service** 两种；selfhosted-ha 建议新增第三种 **`selfhosted`**，或在实现阶段等价于 **「Standalone 接线 + OB/Redis 扩展」**（见下表方案 B）。
-
-#### 4.4.1 代码里实际是「两条整机接线」，不是统一插件总线
-
-```mermaid
-flowchart TB
-  subgraph ST [Standalone 接线 · 现网与 selfhosted 目标均走此路]
-    ST1[TdaiCore 直连 Store]
-    ST2[LocalStorage 本地盘 / NFS]
-    ST3[instance 默认 default]
-  end
-
-  subgraph SV [Service 接线 · 腾讯云专用]
-    SV1[integrations 私有子模块]
-    SV2[StorePool + TCVDB]
-    SV3[COS 文件 + 多 instance 路由]
-  end
-
-  API[HTTP API 相同] --> ST
-  API --> SV
-```
-
-**读图：** 扩展点（metadata / memory / skill **接口**）存在，但被包在上述两套接线里。**selfhosted 复用 Standalone 接线**，替换接口背后的 OB 实现；**不**走 Service 的 TCVDB/COS/integrations 链路。
-
-#### 4.4.2 三种官方/目标模式对照
-
-| 维度 | **Standalone** | **Service（官方）** | **selfhosted（目标）** |
-|------|----------------|---------------------|------------------------|
-| **定位** | 单机自托管、SQLite | 腾讯云 SaaS、多副本多 instance | 公司自托管、可水平扩展 |
-| **metadata** | SQLite | MongoDB | **OceanBase** |
-| **向量 / Skill** | SQLite | TCVDB | **OceanBase VECTOR** |
-| **L2/L3 文件** | 本地盘 | COS | **NFS** |
-| **锁 / 队列** | 默认进程内；可配 Redis | Redis | **Redis（必须）** |
-| **Gateway 接线** | TdaiCore + 本地存储 | StorePool + integrations + COS | **同 Standalone** |
-| **instance** | 通常 `default` | 多 `x-tdai-service-id` | **固定 `default`（本期）** |
-| **公司能否直接用** | 现网分片在用 | ❌ 缺私有模块 + 腾讯组件 | ✅ 目标形态 |
-
-#### 4.4.3 实现路径对比（为何不在 Service 上改）
-
-| 方案 | 做法 | 主要工作量 | 风险 |
-|------|------|------------|------|
-| **A. 新增 `deployMode: selfhosted`** | Standalone 接线 + OB adapter + 启动校验 | **P2/P3 adapter** + 少量 mode/校验代码 | 低；语义清晰 |
-| **B. 继续 `standalone` + 换 backend 配置** | 不增 enum，yaml 指定 mysql/obvector/redis | **与 A 相同的 adapter**；少写 enum | 中；名为 standalone 易与 SQLite 单机混淆 |
-| **C. 在 `service` 模式上改** | 把 Mongo/TCVDB/COS 换成 OB/NFS | adapter **+** 拆除 integrations/Shark/多 instance/COS 整条链路 | **高**；与官方 Service 语义冲突 |
-
-**结论（建议方案 A 或 B，等价实现）：**
-
-- **不在官方 Service 上叠加实现**——Service 绑定 integrations 子模块、MongoDB、TCVDB、COS，与公司环境不符，改动面大于新增存储 adapter。
-- **主要研发在扩展点（P2–P4）**：实现 metadata / memory / skill / Hub 的 **OceanBase 适配器**；与是否新增 enum **工作量同级**。
-- **新增 mode 的增量**主要是：配置解析、启动校验（OB 必填、Redis 必填、禁止 SQLite metadata 混用），**不是**第三条完整 Gateway 链路。
-
-```text
-selfhosted  ≈  Standalone 进程接线
-              +  metadata / memory / skill → OceanBase 适配器（P2/P3）
-              +  stateBackend = redis（P3）
-              +  文件仍 LocalStorage → NFS（P5）
-```
-
-技术细节见 [ARCHITECTURE.md §4](./ARCHITECTURE.md#4-deploymode-selfhosted)、[实施计划 P2/P3](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md)。
-
----
-
-## 五、目标态：服务调用与依赖关系
-
-### 5.1 总体关系图
-
-**请求与负载均衡路径**
-
-```mermaid
-flowchart TB
-  CLI[CLI / Agent]
-  WEB[浏览器 Panel]
-
-  NP[nginx-proxy :8096]
-  NH[nginx-hub]
-  NC[nginx-core :8420]
-
-  PX[Proxy x N]
-  HX[Hub x M]
-  CX[Core x N]
-
-  CLI --> NP --> PX --> NC --> CX
-  WEB --> NH --> HX --> NC
-```
-
-**基础设施依赖**（Proxy / Core / Hub 各自连什么）
-
-```mermaid
-flowchart TB
-  PX[Proxy]
-  CX[Core]
-  HX[Hub]
-
-  R[(Redis)]
-  OB[(OceanBase)]
-  FS[(NFS)]
-  LLM[LLM 网关]
-
-  PX -->|会话| R
-  PX -->|转发 Agent 对话| LLM
-
-  CX -->|Pipeline 锁 / Skill 队列| R
-  CX -->|metadata / 向量 / 注册表| OB
-  CX -->|L2/L3 / Skill 文件| FS
-  CX -->|Pipeline / Embedding / 生成| LLM
-
-  HX -->|Knowledge 引擎表| OB
-  HX -->|Git 仓库 / 索引产物| FS
-  HX -->|Embedding / 生成| LLM
-```
-
-> Panel 用户 / Team / Agent 经 **Hub → nginx-core → Core**（见上图请求路径），Hub **不**单独连 MongoDB 类组件；结构化与向量数据统一进 **OceanBase**。
-
-### 5.2 调用关系说明
-
-| 调用路径 | 说明 |
-|----------|------|
-| **用户/Agent → Proxy** | 统一入口；Proxy 负责鉴权、会话、记忆注入 |
-| **Proxy → Core** | 记忆 L0/L1/L2/L3、Skill、元数据（用户/Team/Key）等 **均经 nginx-core** |
-| **Hub Panel → Core** | 管理台无独立用户库，Team/User/Agent 等 **全部调 Core** |
-| **Agent 查 Wiki/CodeGraph → Hub Knowledge** | Knowledge 引擎 API 在 Hub `:8424`；Core 只存 Knowledge **注册信息** |
-| **Core / Hub → LLM** | Embedding、生成类能力走公司 LLM 网关 |
-| **Proxy / Core / Hub → Redis** | 会话、锁、队列（Core 多副本 **必须** Redis） |
-| **Core / Hub → OceanBase** | 结构化数据 + 向量检索 |
-| **Core / Hub → 文件存储** | 大文本、Git 仓库、索引文件（不进 OB） |
-
-### 5.3 服务依赖矩阵
-
-|  | Redis | OceanBase | 共享文件 | LLM | 依赖其他应用服务 |
-|--|:-----:|:---------:|:--------:|:---:|:----------------|
-| **Proxy** | ✅ 必须 | — | — | ✅ | Core（经 nginx-core） |
-| **Core** | ✅ 必须（多副本） | ✅ 必须 | ✅ 必须 | ✅ | — |
-| **Hub** | ✅ 建议（构建锁） | ✅ Phase4 后 | ✅ 必须 | ✅ | Core（Panel，经 nginx-core） |
-
----
-
-## 六、存储分层与组件替换
-
-### 6.1 现状 → 目标对照
-
-| 能力 | 现状（Standalone） | 官方 Service | 目标（selfhosted-ha） |
-|------|---------------------|-------------|---------------------|
-| 用户 / Team / API Key | Core SQLite | MongoDB | **OceanBase** |
-| 记忆向量 L0/L1 | Core SQLite | TCVDB | **OceanBase VECTOR** |
-| Skill 向量 | Core SQLite | TCVDB | **OceanBase VECTOR** |
-| L2/L3 / Skill 文件 | 本地盘 | COS | **NFS 共享目录** |
-| Hub 引擎元数据 | Hub SQLite | — | **OceanBase** |
-| 锁 / 会话 / 队列 | 本地 + Redis | Redis | **Redis** |
-
-**不引入：** MongoDB、TCVDB、COS、PostgreSQL、独立向量数据库。
-
-### 6.2 OceanBase 库内逻辑（单库 `agent_team_memory`）
-
-```mermaid
-%%{init: {'theme': 'neutral', 'themeVariables': {'fontSize': '15px'}}}%%
 flowchart LR
   DB[("agent_team_memory")]
-
-  DB --- T1["meta_* · 用户/Team/Key"]
-  DB --- T2["l0/l1_* · 记忆向量"]
-  DB --- T3["skill_* · Skill 向量"]
-  DB --- T4["entity_knowledge · 注册表"]
-  DB --- T5["knowledge_* · Hub 引擎"]
-
-  style DB fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-  style T1 fill:#f8fafc,stroke:#94a3b8
-  style T2 fill:#f8fafc,stroke:#94a3b8
-  style T3 fill:#f8fafc,stroke:#94a3b8
-  style T4 fill:#f8fafc,stroke:#94a3b8
-  style T5 fill:#f8fafc,stroke:#94a3b8
+  DB --- T1["meta_*"]
+  DB --- T2["l0/l1_* · skill_*"]
+  DB --- T3["entity_knowledge"]
+  DB --- T4["knowledge_*"]
 ```
 
-字符集：**utf8mb4 / utf8mb4_general_ci**（已建库）。
+**不引入：** MongoDB、TCVDB、COS、PostgreSQL、独立向量库。
 
-### 6.3 文件存储（不进 OB）
+### 3.3 部署架构
+
+目标态将 ATM 拆为以下模块，分别构建、发布与扩缩（管理控制台与知识服务不再打成同一个合并包）。容器编排与对外接入由 **公司流水线 / 平台** 负责，对外以 **域名** 访问，本方案不单独建设接入层。
+
+| 模块 | 职责 | 访问（域名示例） | 交付物 |
+|------|------|------------------|--------|
+| **接入代理 Proxy** | Agent/IDE 入口；会话、记忆注入；对话转发 | `proxy.<域>` | `memory-proxy` |
+| **记忆核心 Core** | 记忆 L0–L3、Skill、元数据 API | `core.<域>`（内网） | `memory-core` |
+| **管理控制台 Panel** | 用户 / Team / Agent / Knowledge 注册与管理 | `panel.<域>` | `memory-panel` |
+| **知识服务 Knowledge** | Wiki / CodeGraph 引擎 API | `knowledge.<域>` | `memory-knowledge` |
 
 ```mermaid
-%%{init: {'theme': 'neutral', 'themeVariables': {'fontSize': '15px'}}}%%
-flowchart LR
-  ROOT["/data/tdai · NFS"] --> CORE["core/<br/>L2/L3 · Skill 文件"]
-  ROOT --> HUB["hub/knowledge/<br/>Git · 索引"]
+flowchart TB
+  subgraph APP [应用层 · 均可加副本]
+    PX[Proxy x N]
+    CX[Core x N]
+    PL[Panel x M]
+    KS[Knowledge x K]
+  end
 
-  style ROOT fill:#fef3c7,stroke:#d97706,stroke-width:2px
-  style CORE fill:#f8fafc,stroke:#94a3b8
-  style HUB fill:#f8fafc,stroke:#94a3b8
+  subgraph INFRA [共享基础设施]
+    OB[(OceanBase)]
+    R[(Redis)]
+    FS[(NFS /data/tdai)]
+    PGW[平台公共 LLM 网关]
+  end
+
+  subgraph EXT [用户侧 · 非平台统一部署]
+    UGW[用户 MaaS 网关]
+  end
+
+  PX -->|域名| CX
+  PL -->|域名| CX
+  PX --> R
+  PX -->|Agent 对话| UGW
+  CX --> OB
+  CX --> R
+  CX --> FS
+  CX -->|Embedding · Pipeline| PGW
+  KS --> OB
+  KS --> FS
+  KS -->|Embedding · 构建| PGW
+  KS --> R
 ```
 
-多 Core / 多 Hub 副本 **必须** 挂载同一共享目录（NFS）。
+**部署约定**
+
+- 各模块走公司流水线单独构建与发布；配置用环境变量 / ConfigMap；对外暴露由平台挂域名与负载均衡。
+- Proxy / Panel 访问 Core **走 Core 域名**，不直连单个 Core 实例。
+- Knowledge 对外域名路径须含 API 前缀（如 `/v3`），供 Agent / Panel 配置 `service_url`。
+- OceanBase、Redis、NFS 由中间件 / 基础设施提供，不随应用发布扩缩。
+
+**水平扩展**
+
+| 模块 | 扩展方式 | 前提 |
+|------|----------|------|
+| **Proxy** | 加副本（域名侧负载均衡） | Redis 会话 |
+| **Core** | 加副本 | metadata/向量已上 OB；Redis 锁；NFS |
+| **Panel** | 加副本 | 无本地业务库（状态在 Core） |
+| **Knowledge** | 加副本 | 引擎表已上 OB；NFS；构建锁用 Redis |
+
+加副本 **不增加** OB 库数量；各模块共用同一 OB 连接与 NFS。验证期建议各模块 2 实例（对应存储改造完成后）。
+
+**部署形态**
+
+| 形态 | 用途 | 要点 |
+|------|------|------|
+| **联调 / 预发** | 验证存储与多副本 | 各模块分别发布；连公司 OB / Redis；共享盘或 NFS |
+| **生产** | 正式环境（本期不含） | 需申请正式中间件资源；各模块独立制品与副本 |
+
+容器与接入层由公司流水线承接；本方案交付各模块镜像与配置约定。
+
+### 3.4 关键改造点
+
+| # | 改造项 | 说明 |
+|---|--------|------|
+| 1 | 适配公司流水线 | 各模块构建、发布、环境变量 / ConfigMap、域名暴露等接入公司平台 |
+| 2 | 管理控制台与知识服务拆分 | 分开发布；按模块扩缩 |
+| 3 | Core metadata → OB | `IMetadataStore` MySQL/OB 适配 |
+| 4 | Core 向量 / Skill → OB | `IMemoryStore` / `ISkillStore` + VECTOR；含 `entity_knowledge` |
+| 5 | Core 锁 / 队列 → Redis | 多 Core 实例并行的前提 |
+| 6 | Knowledge 引擎库 → OB | 原 `knowledge.db`；支持知识服务多实例 |
+| 7 | 文件进 NFS | Core 与 Knowledge 共享约定路径 |
+| 8 | 部署模式配置 | 建议 `selfhosted`（或 Standalone 接线 + OB/Redis）；**不**改官方 Service |
+
+## 四、实施路径
+
+### 4.1 本期范围
+
+| 范围 | 说明 |
+|------|------|
+| **本期** | 在公司流水线 **测试环境** 完成部署与验收 |
+| **生产环境** | 需申请正式 OceanBase、Redis、NFS，本期不包含 |
+
+### 4.2 主要工作
+
+| 工作 | 做什么 | 做到什么程度 |
+|------|--------|--------------|
+| **接入公司流水线** | 官方 ATM 源码纳入公司构建 / 发布流程；各模块在测试环境以域名对外 | 部署链路打通 |
+| **架构改造与验证** | 按关键改造点完成存储与模块改造；对接公司测试用 OceanBase、Redis、NFS 联调 | 目标存储、多副本、Panel / Knowledge 拆分等验证通过 |
+| **测试环境交付** | 改造后的代码经流水线发布到测试环境，按目标部署架构运行 | 测试环境全链路可用 |
+
+接入流水线与架构改造 **可同时进行**，具体顺序由研发按依赖安排。对接公司组件随各改造项一并验证，不单独拆步。
+
+### 4.3 工期
+
+| 阶段 | 工期 |
+|------|------|
+| **测试环境**（本期） | 约 **1～2 周** |
+| **生产环境**（如需） | 约 **2 周** |
+
+### 4.4 里程碑
+
+| 里程碑 | 标志 |
+|--------|------|
+| **部署链路可用** | 测试环境经流水线可访问 ATM，基本业务链路可演示 |
+| **存储改造就绪** | metadata、向量 / Skill、Knowledge 引擎库等已迁 OB；锁 / 会话走 Redis；文件走 NFS |
+| **测试环境达标** | 各模块可扩副本，全链路在测试环境稳定运行 |
 
 ---
 
-## 七、水平扩展设计
-
-### 7.1 各服务扩展能力
-
-| 服务 | 是否无状态 | 扩展方式 | 限制条件 |
-|------|-----------|----------|----------|
-| **Proxy** | 是（会话在 Redis） | 增加副本 + nginx-proxy | Redis 高可用 |
-| **Core** | 是（状态在 OB/Redis/文件） | 增加副本 + nginx-core | **P3 完成前** 仅 1 副本；需 OB 适配 + Redis stateBackend |
-| **Hub** | 部分无状态 | 增加副本 + nginx-hub | **P4 完成前** 仅 1 副本；需 Hub DB 迁 OB + 共享 knowledge 目录 |
-
-### 7.2 首期与目标副本（单机 Docker 验证）
-
-| 组件 | 验证期 | 目标态 |
-|------|--------|--------|
-| Proxy | 2 | 按负载 N |
-| Core | 1 → **2**（P3 后） | 按负载 N |
-| Hub | 1 → **2**（P4 后） | 按负载 M |
-| nginx-* | 1 | 1（或 K8s Ingress 替代） |
-
-**原则：** 应用加副本 **不增加** OB 库数量；所有副本共用同一连接串与 NFS（单 instance `default`）。
-
----
-
-## 八、部署实施路径
-
-### 8.1 阶段总览
-
-```mermaid
-%%{init: {'theme': 'neutral', 'themeVariables': {'fontSize': '15px'}}}%%
-flowchart LR
-  S([方案确认]) --> A[Phase A<br/>研发适配]
-  A --> B[Phase B<br/>Docker 多副本]
-  B --> C[Phase C<br/>NFS + 生产 OB/Redis]
-  C --> D[Phase D<br/>Kubernetes]
-  D --> E([验收上线])
-
-  style S fill:#f1f5f9,stroke:#64748b
-  style A fill:#e0f2fe,stroke:#0284c7
-  style B fill:#e0f2fe,stroke:#0284c7
-  style C fill:#fef3c7,stroke:#d97706
-  style D fill:#ecfdf5,stroke:#059669
-  style E fill:#dcfce7,stroke:#16a34a
-```
-
-### 8.2 一期：单机 Docker 多副本
-
-**适用：** 开发联调、PoC、小流量预发。
-
-| 项 | 做法 |
-|----|------|
-| 编排 | Docker Compose + `--scale proxy=2` 等 |
-| 负载均衡 | 容器内 **nginx** 反向代理到多副本 |
-| OB / Redis | 连接 **公司测试/生产** 地址（compose 不部署 OB） |
-| 文件 | 宿主机 bind mount `/data/tdai`，验证通过后再挂 NFS |
-| 交付物 | `deploy/selfhosted-ha/docker-compose.yml`、`.env.example`、`up.sh` |
-
-### 8.3 二期：Kubernetes 部署
-
-**适用：** 生产环境、跨节点扩展、与现有 K8s 体系一致。
-
-| 项 | 做法 |
-|----|------|
-| 工作负载 | Proxy / Core / Hub 各一个 **Deployment**，`replicas` 可调 |
-| 入口 | **Ingress** 或 LB Service（8096 / 8125 / 8424） |
-| 内网 Core | ClusterIP Service `nginx-core:8420`，禁止 Pod 直连单个 Core Pod |
-| 配置 | ConfigMap + Secret（`TDAI_OB_URI`、Redis、LLM） |
-| 文件 | **PVC + NFS**（或公司存储类），Mount 路径与 Docker 一致 |
-| OB / Redis | **ExternalName / 集群外 Endpoints**，不随 Pod 扩缩 |
-| 交付物 | K8s manifests（Phase D，Compose 验证通过后编写） |
-
-**Docker 与 K8s 拓扑一致：** 仅编排方式不同，服务划分、依赖、存储连接 **不变**。
-
-### 8.4 研发任务（P0–P6）
-
-| 阶段 | 研发内容 | 目标部署能力 |
-|------|----------|--------------|
-| **P0** | compose / nginx / 脚本骨架 | 单副本栈可启动 |
-| **P1** | Proxy 多副本 | Proxy×2 + Redis 会话 |
-| **P2** | Core metadata → OB | 用户/Team/Key 进 OB |
-| **P3** | Core 向量 + Skill + Redis 锁 | **Core×2** |
-| **P4** | Hub knowledge.db → OB | **Hub×2** |
-| **P5** | 共享文件目录（本机共享盘或 NFS） | Core/Hub 多副本共享 L2/L3、Git |
-| **P6** | K8s manifests 初版 | 与 Compose 等价拓扑 |
-
-任务拆解见 [实施计划](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md)；审查见 [`REVIEW.md`](./REVIEW.md)。
-
-### 8.5 建设周期（5 个工作日）
-
-**总工期：5 个工作日。** P0–P6 在同一周内 **并行推进**（Compose 验证为主，K8s  manifest 同步产出），不按多周分期。
-
-#### 开工前置（D0，不计入 5 日）
-
-| 项 | 要求 |
-|----|------|
-| OceanBase | 测试库 **`agent_team_memory`** 已建；账号具备 DDL 与 `DBMS_HYBRID_SEARCH` |
-| Redis | 测试实例可用 |
-| Embedding | 模型与向量维度已确认（用于 `VECTOR(n)` DDL） |
-| 环境 | 1～2 名研发 + 测试机 Docker Compose；与现网 **并行**，不割接 |
-
-#### 五日计划
-
-| 日 | 并行任务 | 当日验收 |
-|:--:|----------|----------|
-| **D1** | **P0** compose / nginx / `up.sh`；**P1** Proxy×2 + Redis；OB/Redis 环境变量接入 | 双 Proxy 经 nginx 接入；重启单 Proxy 会话不丢 |
-| **D2** | **P2** metadata → OB（adapter + DDL + 合约测试）；启动 **P3** 向量表 DDL | Panel 建用户/Team 写入 OB |
-| **D3** | **P3** 向量 + Skill store + Redis 锁；**nginx-core**；**Core×2** | 双 Core 读写一致；Pipeline 锁生效 |
-| **D4** | **P3** 收尾（`entity_knowledge`、迁移脚本）；**P4** Hub 引擎表迁 OB；**Hub×2** | Hub 双副本可读；CodeGraph 构建不重复（Redis 锁） |
-| **D5** | **P5** NFS 共享目录挂载；**P6** K8s manifest；全链路回归 | Proxy×2 / Core×2 / Hub×2 + OB + Redis + NFS 联调通过 |
-
-```mermaid
-flowchart LR
-  D1[D1 部署+P1] --> D2[D2 P2 metadata]
-  D2 --> D3[D3 P3 Core×2]
-  D3 --> D4[D4 P4 Hub×2]
-  D4 --> D5[D5 P5 文件+P6 K8s]
-```
-
-#### 一周内交付范围
-
-| 能力 | 5 日末 |
-|------|:------:|
-| Proxy ×2 + nginx | ✅ |
-| Core ×2 + nginx-core | ✅ |
-| Hub ×2 + nginx-hub | ✅ |
-| metadata / 向量 / Skill → OB | ✅ |
-| Hub 引擎表 → OB | ✅ |
-| Redis 锁与会话 | ✅ |
-| 共享文件（NFS） | ✅ |
-| K8s manifest（与 Compose 同拓扑） | ✅ |
-
----
-
-## 九、需协调的外部资源
-
-| 资源 | 要求 | 责任方 |
-|------|------|--------|
-| OceanBase 租户 | MySQL 模式，**4.4.2**；库 **`agent_team_memory`**；账号 DDL + `DBMS_HYBRID_SEARCH` 权限 | DBA |
-| Redis | 生产/测试实例；Core 与 Proxy 共用或分库前缀 | 中间件 |
-| NFS（或等价共享存储） | 挂载路径 `/data/tdai`；Core/Hub 多副本共享 | 基础设施 |
-| LLM 网关 | 现有 OpenAI 兼容接口；Embedding 维度需与向量表一致 | 平台/算法 |
-| （可选）K8s 命名空间 / Ingress | Phase D 使用 | 容器平台 |
-
----
-
-## 十、风险与对策（摘要）
+## 五、风险与对策（摘要）
 
 | 风险 | 对策 |
 |------|------|
-| Core 向量适配工作量大 | 分 P2/P3 交付；P3 前 Core 保持单副本 |
+| Core 向量适配工作量大 | 分阶段交付；向量迁 OB 完成前 Core 保持单副本 |
 | 向量维度与模型不一致 | 启动校验 + 与 LLM 团队确认 embedding 规格 |
-| Hub 未完成 OB 迁移前扩副本 | 强制 hub replicas=1 直至 P4 |
+| Knowledge 引擎库未迁 OB 前扩副本 | Knowledge 写库完成前慎扩；Panel 无状态可先扩 |
 | NFS 并发写文件 | Pipeline 锁走 Redis；文件路径规范不变 |
 | 中文混合检索效果 | OB 4.4.2 POC；可降级纯向量检索 |
-
----
-
-## 附录：相关文档
-
-| 文档 | 读者 |
-|------|------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 研发 / 架构 — 目标拓扑、数据分层、配置、迁移 |
-| [REVIEW.md](./REVIEW.md) | 研发 — 审查与风险 |
-| [README.md](./README.md) | 全员 — 索引与 OB 对接清单 |
-| [实施计划 P0–P6](../../docs/superpowers/plans/2026-08-26-selfhosted-ha-oceanbase.md) | 研发 — 任务与验收 |
-
-**文档版本：** 2026-08-27 · 分支 `feat/selfhosted-ha-oceanbase`
