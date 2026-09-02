@@ -1,129 +1,199 @@
-# SUIB-12 stack discovery — generated from repo release snapshot
-# Baseline commit at PLAN-2: fb75af0 (branch agent/delivery-lead/33a3f5ed3dd3, tracks release)
+# SUIB-12 stack discovery — generated from repo `release` snapshot
+# Author: Architect (PLAN-2)
+# Verified against commit 2a9f762 on branch agent/architect/9f499f1d1343 (tracks release)
 
 issue_id: 01a061ff-d640-77ec-84c9-5a34c86757a9
 issue_key: SUIB-12
 repo: https://github.com/li6540123/TencentDB-Agent-Memory.git
 baseline_ref: release
-baseline_commit: fb75af0e7a30a516e59eaf1a5ba4f0a34f6f8e98
+baseline_commit: 2a9f762845c60e998622ac33ef4d8ee6155993f3
 
-host_requirements:
-  os: macOS or Linux
-  docker: Docker Desktop / OrbStack / colima + docker CLI
-  docker_buildx: required for cross-platform amd64 build on arm64 hosts
-  tools: [bash, curl, rsync, docker, git]
-  node_version: ">=22.16 (per README; used inside Docker build stages only)"
+# ── Repo layout ────────────────────────────────────────────────────
+repo_layout:
+  frontend: null                     # memory-core is headless gateway; no React app at root
+  backend: MemoryCore/               # primary service being rebuilt
+  auxiliary:
+    - MemoryProxy/                   # LLM forwarding proxy (port 8096)
+    - MemoryPanel/                   # admin UI (Vite/React) packaged into memory-hub
+    - MemoryKnowledge/               # knowledge/wiki API packaged into memory-hub
+    - deploy/panel-knowledge-combined/  # build recipe that merges Panel + Knowledge
+    - deploy/global-images/           # **default deployment path** (PRD OQ-3)
+    - deploy/internal-team/          # fallback build path (offline/compose)
+    - deploy/dockerhub/              # **default build script** (publish.sh)
 
+# ── Languages & package managers ───────────────────────────────────
+languages:
+  backend: TypeScript (Node 22 ESM, tsdown; gateway uses native `http`, proxies use Hono)
+  frontend: TypeScript + React (Vite, inside MemoryPanel/)
+  admin_panel: TypeScript + React (Vite)
+  knowledge_api: TypeScript (Hono)
+
+package_managers:
+  repo_lockfile: pnpm-lock.yaml
+  docker_build: npm@11 (inside container, per MemoryCore/Dockerfile)
+  dockerfile_local_fallback: MemoryCore/Dockerfile.local
+
+# ── Components (rebuilt from release) ──────────────────────────────
 components:
   - id: memory-core
     source: MemoryCore/
     dockerfile: MemoryCore/Dockerfile
+    base_image: node:22-slim
     default_image: agentmemory/memory-core
     container_name: tdai-memory-core
-    port: 8420
+    host_port: 8420
+    container_port: 8420
+    healthcheck: "curl -fsS http://127.0.0.1:${TDAI_GATEWAY_PORT:-8420}/health"
+    pid1: tini
+    cmd: ["node", "--import", "tsx", "src/gateway/server.ts"]
   - id: memory-hub
-    source: MemoryPanel/ + MemoryKnowledge/
-    build_recipe: deploy/panel-knowledge-combined/
+    source: MemoryPanel/ + MemoryKnowledge/ (merged via deploy/panel-knowledge-combined/build.sh)
     dockerfile: deploy/panel-knowledge-combined/Dockerfile
     default_image: agentmemory/memory-hub
     container_name: tdai-memory-hub
-    ports: [8125, 8424]
+    host_ports: [8125, 8424]
+    note: |
+      Panel UI on 8125, Knowledge API on 8424.
+      Both built into single merged image by deploy/panel-knowledge-combined/build.sh.
   - id: memory-proxy
     source: MemoryProxy/
     dockerfile: MemoryProxy/Dockerfile
     default_image: agentmemory/memory-proxy
     container_name: tdai-proxy
-    port: 8096
+    host_port: 8096
 
-languages:
-  memory_core: TypeScript (Node ESM, tsdown)
-  memory_hub_panel: TypeScript + React (Vite)
-  memory_hub_knowledge: TypeScript (Hono)
-  memory_proxy: TypeScript (Hono)
+# ── Test commands (must exist in repo) ─────────────────────────────
+test_commands:
+  l1_frontend: "cd MemoryPanel/web && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) && npm run build"
+  l1_backend:  "cd MemoryCore && npm install --ignore-scripts --no-audit --no-fund && npm test"
+  l1_optional_proxy: "cd MemoryProxy && npm install --ignore-scripts --no-audit --no-fund && npm test"
+  l2_integration: |
+    cd deploy/global-images && ./verify.sh --skip-llm && \
+    docker ps --format '{{.Names}} {{.Status}}' | \
+      grep -E 'tdai-memory-core|tdai-memory-hub|tdai-proxy' | grep -v Restarting | wc -l | grep -qx 3
+  l3_e2e:
+    smoke_health_core: "curl -sf http://127.0.0.1:8420/health"
+    smoke_health_panel: "curl -sf http://127.0.0.1:8125/health"
+    smoke_health_knowledge: "curl -sf http://127.0.0.1:8424/health"
+    smoke_health_proxy: "curl -sf http://127.0.0.1:8096/health"
+    smoke_knowledge_docs: "curl -sf http://127.0.0.1:8424/docs"
+    note: |
+      Each endpoint must return HTTP 200 with body containing status indicator.
+      T0 contract for full payloads in design.md §4.
 
-build:
-  primary_script: deploy/dockerhub/publish.sh
-  primary_cmd: |
-    cd deploy/dockerhub
-    VERSION=suib-12-$(date +%Y%m%d) PUSH=0 LOAD_PLATFORM=linux/amd64 ./publish.sh all
-  primary_notes: |
-    - PUSH=0 loads single-arch linux/amd64 images locally (no Docker Hub push).
-    - Produces agentmemory/memory-core|memory-proxy|memory-hub:${VERSION}.
-    - Runs secret-scan before build (MemoryPanel/scripts/secret-scan.sh).
-    - Requires docker buildx builder "multiarch" (script auto-creates).
-  alternate_script: deploy/internal-team/build-local.sh
-  alternate_cmd: |
-    cd deploy/internal-team
-    PLATFORM=linux/amd64 TAG=suib-12-$(date +%Y%m%d) ./build-local.sh
-  alternate_notes: |
-    - Produces tdai-local/memory-core|memory-proxy|memory-hub:${TAG}.
-    - Pair with deploy/internal-team/up-local.sh (compose path, not global-images).
-  amd64_verify_cmd: |
-    docker image inspect agentmemory/memory-core:${VERSION} --format '{{.Architecture}}' | grep -qx amd64
-
-deploy:
-  path: deploy/global-images
-  entry_script: deploy/global-images/start-all.sh
-  verify_preflight: deploy/global-images/verify.sh
-  verify_preflight_skip_llm: deploy/global-images/verify.sh --skip-llm
-  stop_script: deploy/global-images/stop-all.sh
-  env_template: deploy/global-images/.env.example
-  env_file: deploy/global-images/.env
-  network: tdai-memory-stack
-  image_env_vars:
-    - MEMORY_CORE_IMAGE
-    - MEMORY_HUB_IMAGE
-    - PROXY_IMAGE
-  required_llm_env:
-    memory_group: [MEMORY_LLM_BASE_URL, MEMORY_LLM_API_KEY, MEMORY_LLM_MODEL]
-    proxy_group: [PROXY_UPSTREAM_URL, PROXY_UPSTREAM_API_KEY, PROXY_UPSTREAM_MODEL]
-
-# T0 — health & smoke endpoints (authoritative for QA evidence)
-t0_contract:
-  smoke:
+# ── API contract (T0 — health endpoints) ──────────────────────────
+api_contract:
+  format: adhoc-md
+  path: ".delivery/01a061ff-d640-77ec-84c9-5a34c86757a9/design.md#4-t0-契约"
+  t0_health:
     - id: SM-1
       service: memory-core
       method: GET
       url: http://127.0.0.1:8420/health
+      source: MemoryCore/src/gateway/server.ts:1046 + types.ts:18
       expect_http: 200
-      expect_body_contains: ok
+      response_type: HealthResponse
+      response_schema:
+        status: '"ok" | "degraded"'
+        version: string
+        uptime: number
+        stores:
+          vectorStore: boolean
+          embeddingService: boolean
+        services:
+          timerScanner: unknown
+          pipelineWorker: unknown
+          stateBackend: string
     - id: SM-2a
       service: memory-hub-panel
       method: GET
       url: http://127.0.0.1:8125/health
+      source: MemoryPanel/src/panel/http/routes/meta/instances.ts:5
       expect_http: 200
     - id: SM-2b
       service: memory-hub-knowledge
       method: GET
       url: http://127.0.0.1:8424/health
+      source: MemoryKnowledge/src/routes/health.ts:10
       expect_http: 200
     - id: SM-3
       service: memory-proxy
       method: GET
       url: http://127.0.0.1:8096/health
+      source: MemoryProxy/src/server.ts:84
       expect_http: 200
     - id: SM-5
       service: knowledge-swagger
       method: GET
       url: http://127.0.0.1:8424/docs
       expect_http: 200
-  container_check_cmd: |
-    docker ps --filter name=tdai-memory --format '{{.Names}} {{.Status}}' | grep -E 'tdai-memory-core|tdai-memory-hub|tdai-proxy' | grep -v Restarting
-  rollback_cmd: |
-    cd deploy/global-images && ./stop-all.sh
+      note: "Swagger UI — confirms Knowledge API surface is mounted"
 
+# ── Build & deploy (paths verified in repo) ────────────────────────
+build:
+  primary_script: deploy/dockerhub/publish.sh
+  primary_cmd: |
+    cd deploy/dockerhub && \
+    VERSION=suib-12-$(date +%Y%m%d) PUSH=0 LOAD_PLATFORM=linux/amd64 ./publish.sh all
+  primary_notes: |
+    - PUSH=0 keeps images local (no Docker Hub push).
+    - LOAD_PLATFORM=linux/amd64 forces single-arch build for arm64 hosts.
+    - Publish script auto-creates buildx builder "multiarch".
+    - Runs secret-scan (MemoryPanel/scripts/secret-scan.sh) before build.
+  alternate_script: deploy/internal-team/build-local.sh
+  alternate_cmd: |
+    cd deploy/internal-team && \
+    PLATFORM=linux/amd64 TAG=suib-12-$(date +%Y%m%d) ./build-local.sh
+  alternate_notes: |
+    Fallback only. Produces tdai-local/* images; pair with up-local.sh.
+  amd64_verify_cmd: |
+    docker image inspect agentmemory/memory-core:suib-12-$(date +%Y%m%d) \
+      --format '{{.Architecture}}' | grep -qx amd64
+
+deployment:
+  path: deploy/global-images
+  entry_script: deploy/global-images/start-all.sh
+  verify_preflight: deploy/global-images/verify.sh
+  verify_preflight_skip_llm: deploy/global-images/verify.sh --skip-llm
+  stop_script: deploy/global-images/stop-all.sh
+  stop_purge_script: deploy/global-images/stop-all.sh --purge
+  env_template: deploy/global-images/.env.example
+  env_file: deploy/global-images/.env
+  network: tdai-memory-stack
+  volumes:
+    - tdai-memory-core-data
+    - tdai-panel-data
+  required_env_vars:
+    image: [MEMORY_CORE_IMAGE, MEMORY_HUB_IMAGE, PROXY_IMAGE]
+    memory_llm: [MEMORY_LLM_BASE_URL, MEMORY_LLM_API_KEY, MEMORY_LLM_MODEL]
+    proxy_llm: [PROXY_UPSTREAM_URL, PROXY_UPSTREAM_API_KEY, PROXY_UPSTREAM_MODEL]
+    ports: [MEMORY_CORE_PORT, PANEL_PORT, KNOWLEDGE_PORT, PROXY_PORT]
+  hint: "CI in .github/workflows/pr-ci.yml does not build images (PR validates pack only); no CI docker-image-build to mirror."
+
+# ── Constraints (must respect repo conventions) ────────────────────
+constraints:
+  - "沿用 repo 现有 npm/vitest/TypeScript 工具链；不引入新框架"
+  - "镜像构建必须经 deploy/dockerhub/publish.sh 或 deploy/internal-team/build-local.sh（不允许裸 docker build 跳过 secret-scan）"
+  - "MemoryCore/Dockerfile 已 npm install --omit=dev + esbuild --no-save；不改写 BUILD 流水线"
+  - "部署路径锁定 deploy/global-images（PRD OQ-3 默认）；internal-team 仅作 fallback"
+  - ".env 含密钥，不得 commit；只 commit .env.example 或文档变更"
+  - "release 快照构建失败需最小 hotfix 时，必须先在 PR description 标注并走 PO 决策（Q4 默认不在本 PR 带修）"
+  - "amd64-only（MAC arm64 用 buildx --platform linux/amd64 交叉构建）"
+
+# ── Test strategy ──────────────────────────────────────────────────
 test_strategy:
-  L1:
-    - deploy/dockerhub/publish.sh PUSH=0 (build exit 0)
-    - optional unit tests (non-blocking for this delivery):
-        - cd MemoryCore && npm test
-        - cd MemoryProxy && npm test
-  L2:
-    - deploy/global-images/verify.sh --skip-llm
-    - start-all.sh → three containers Running, ports listening
-  L3:
-    - t0_contract smoke curls (SM-1..SM-5)
-    - optional: verify.sh without --skip-llm when LLM keys available
-
-feature_branch: agent/full-delivery/suib-12-rebuild-amd64
-image_tag_convention: suib-12-YYYYMMDD
+  l1_required: true
+  l2_required: true
+  l3_required: true
+  skip_l3_if: []
+  layers:
+    L1_unit:
+      - "MemoryCore: npm install --ignore-scripts && npm test (vitest)"
+      - "MemoryProxy: npm install --ignore-scripts && npm test (optional but recommended)"
+    L2_container_startup:
+      - "deploy/global-images/verify.sh --skip-llm (offline-safe env check)"
+      - "deploy/global-images/start-all.sh → three containers Up (not Restarting)"
+      - "docker ps check: 3 tdai containers present"
+    L3_smoke:
+      - "T0 health contracts (SM-1, SM-2a, SM-2b, SM-3, SM-5) — each ≥ 2 runs"
+      - "Optional SM-6: deploy/global-images/verify.sh full LLM check (when keys available)"
