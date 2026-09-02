@@ -9,6 +9,8 @@
 | Host | macOS arm64 / colima aarch64 |
 | PO decision | `po_verify_arch=arm64` — Mac 本机验证 arm64，amd64 构建保留记录 |
 | Branch | `agent/full-delivery/suib-12-rebuild-amd64` |
+| Baseline commit | `2a9f762` (release) |
+| Verified at | 2026-09-02T20:42 CST |
 
 ## T1' — arm64 build (PASS)
 
