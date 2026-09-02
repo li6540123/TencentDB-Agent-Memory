@@ -1,0 +1,84 @@
+# SUIB-12 QA Report — T4 Verification
+issue: 01a061ff-d640-77ec-84c9-5a34c86757a9
+identifier: SUIB-12
+branch: agent/full-delivery/suib-12-rebuild-amd64
+commit: ebf7fb7
+verified_at: "2026-09-02T12:44:21+08:00"
+verify_arch: arm64  # PO metadata po_verify_arch=arm64
+host: macOS arm64 / colima
+blocking: false
+
+summary: |
+  QA 独立复测 AC1–AC4 PASS（本机 arm64 口径）。
+  T0 smoke 5/5 端点 ×2 全 HTTP 200。
+  AC5 中 deploy.yaml 属 T6 DevOps 交付，stack.yaml 与 qa-report.yaml 已就绪。
+
+acceptance_criteria:
+  AC1:
+    status: pass
+    scope: arm64 per PO decision (po_verify_arch=arm64)
+    evidence:
+      - cmd: |
+          docker image inspect tdai-local/memory-core:suib-12-20260902-arm64 --format '{{.Architecture}}'
+          docker image inspect tdai-local/memory-proxy:suib-12-20260902-arm64 --format '{{.Architecture}}'
+          docker image inspect tdai-local/memory-hub:suib-12-20260902-arm64 --format '{{.Architecture}}'
+        result: "arm64 / arm64 / arm64"
+      - note: amd64 tag suib-12-20260902 built per Dev record; not Mac smoke gate
+
+  AC2:
+    status: pass
+    evidence:
+      - cmd: docker ps --format "{{.Names}} {{.Status}}" | grep tdai
+        result: |
+          tdai-memory-core Up (healthy)
+          tdai-memory-hub Up (healthy)
+          tdai-proxy Up (healthy)
+      - cmd: deploy/global-images/verify.sh --skip-llm
+        result: exit 0 (4 port-in-use warnings expected while running)
+
+  AC3:
+    status: pass
+    evidence:
+      - cmd: |
+          for u in :8420/health :8125/health :8424/health :8096/health :8424/docs; do
+            curl -sf -o /dev/null -w "%{http_code} $u\n" "http://127.0.0.1$u"
+          done
+        run1: "200 ×5"
+        run2: "200 ×5 (after 2s interval)"
+      - sm_mapping: SM-1 core, SM-2 hub panel+knowledge, SM-3 proxy, SM-5 /docs
+
+  AC4:
+    status: pass
+    evidence:
+      - cmd: ls deploy/global-images/{start-all,verify,stop-all}.sh deploy/internal-team/build-local.sh
+        result: all executable scripts present
+      - note: .env.example exists; .env gitignored per design
+
+  AC5:
+    status: partial
+    evidence:
+      - stack.yaml: present
+      - qa-report.yaml: present (this file)
+      - deploy.yaml: pending T6 DevOps
+      - requirements.md: present
+    note: functional gate AC1–AC4 pass; deploy.yaml to be filled by DevOps T6
+
+smoke_runs:
+  - timestamp: "2026-09-02T12:44:19+08:00"
+    endpoints:
+      - { url: http://127.0.0.1:8420/health, status: 200 }
+      - { url: http://127.0.0.1:8125/health, status: 200 }
+      - { url: http://127.0.0.1:8424/health, status: 200 }
+      - { url: http://127.0.0.1:8096/health, status: 200 }
+      - { url: http://127.0.0.1:8424/docs, status: 200 }
+  - timestamp: "2026-09-02T12:44:21+08:00"
+    endpoints:
+      - { url: http://127.0.0.1:8420/health, status: 200 }
+      - { url: http://127.0.0.1:8125/health, status: 200 }
+      - { url: http://127.0.0.1:8424/health, status: 200 }
+      - { url: http://127.0.0.1:8096/health, status: 200 }
+      - { url: http://127.0.0.1:8424/docs, status: 200 }
+
+open_items:
+  - PR not opened (no gh CLI in Dev env); T5 Review needs PR URL
+  - deploy.yaml pending T6
