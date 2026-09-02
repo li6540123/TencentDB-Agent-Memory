@@ -1,0 +1,86 @@
+# SUIB-12 Deploy Record — T6
+issue: 01a061ff-d640-77ec-84c9-5a34c86757a9
+identifier: SUIB-12
+environment: local-staging
+verify_arch: arm64  # PO metadata po_verify_arch=arm64 (Mac local gate)
+baseline_ref: release
+baseline_commit: 2a9f762845c60e998622ac33ef4d8ee6155993f3
+feature_branch: agent/full-delivery/suib-12-rebuild-amd64
+branch_url: https://github.com/li6540123/TencentDB-Agent-Memory/tree/agent/full-delivery/suib-12-rebuild-amd64
+pr_status: pending  # open PR base release, title must include SUIB-12
+deployed_at: "2026-09-02T12:47:05+08:00"
+host: macOS arm64 / colima
+
+images:
+  verify_gate:  # Mac local smoke gate (arm64)
+    memory_core: tdai-local/memory-core:suib-12-20260902-arm64
+    memory_hub: tdai-local/memory-hub:suib-12-20260902-arm64
+    memory_proxy: tdai-local/memory-proxy:suib-12-20260902-arm64
+    platform: linux/arm64
+  record_only:  # built but not Mac smoke gate
+    memory_core: tdai-local/memory-core:suib-12-20260902
+    memory_hub: tdai-local/memory-hub:suib-12-20260902
+    memory_proxy: tdai-local/memory-proxy:suib-12-20260902
+    platform: linux/amd64
+
+build_cmd:
+  primary: |
+    cd deploy/dockerhub
+    PUSH=0 LOAD_PLATFORM=linux/amd64 ./publish.sh all
+  fallback_arm64_mac: |
+    cd deploy/internal-team
+    PLATFORM=linux/arm64 TAG=suib-12-20260902-arm64 BUILD_PROXY_PORT=7897 ./build-local.sh
+  fallback_amd64_record: |
+    cd deploy/internal-team
+    PLATFORM=linux/amd64 TAG=suib-12-20260902 BUILD_PROXY_PORT=7897 ./build-local.sh
+  note: publish.sh timed out on Docker Hub during SUIB-12; build-local.sh used
+
+deploy_path: deploy/global-images
+
+env:
+  template: deploy/global-images/.env.example
+  required_groups:
+    - name: image_tags
+      vars: [MEMORY_CORE_IMAGE, MEMORY_HUB_IMAGE, PROXY_IMAGE]
+    - name: memory_llm
+      vars: [MEMORY_LLM_BASE_URL, MEMORY_LLM_API_KEY, MEMORY_LLM_MODEL]
+    - name: proxy_upstream
+      vars: [PROXY_UPSTREAM_URL, PROXY_UPSTREAM_API_KEY, PROXY_UPSTREAM_MODEL]
+    - name: ports
+      vars: [MEMORY_CORE_PORT, PANEL_PORT, KNOWLEDGE_PORT, PROXY_PORT]
+  setup: |
+    cp deploy/global-images/.env.example deploy/global-images/.env
+    # Set *_IMAGE to arm64 tags above; fill LLM keys; do NOT commit .env
+
+url:
+  memory_core_health: http://127.0.0.1:8420/health
+  panel_health: http://127.0.0.1:8125/health
+  knowledge_health: http://127.0.0.1:8424/health
+  knowledge_docs: http://127.0.0.1:8424/docs
+  proxy_health: http://127.0.0.1:8096/health
+
+health_check: |
+  cd deploy/global-images && ./verify.sh --skip-llm
+  for u in http://127.0.0.1:8420/health http://127.0.0.1:8125/health \
+           http://127.0.0.1:8424/health http://127.0.0.1:8096/health; do
+    curl -sf -o /dev/null -w "%{http_code} $u\n" "$u" | grep -q "^200 "
+  done
+
+rollback_cmd: |
+  cd deploy/global-images && ./stop-all.sh
+
+start_cmd: |
+  cd deploy/global-images && ./start-all.sh
+
+t6_health_evidence:
+  timestamp: "2026-09-02T12:47:05+08:00"
+  containers:
+    - tdai-memory-core: Up (healthy)
+    - tdai-memory-hub: Up (healthy)
+    - tdai-proxy: Up (healthy)
+  endpoints:
+    - { url: http://127.0.0.1:8420/health, status: 200 }
+    - { url: http://127.0.0.1:8125/health, status: 200 }
+    - { url: http://127.0.0.1:8424/health, status: 200 }
+    - { url: http://127.0.0.1:8096/health, status: 200 }
+  verify_sh: exit 0
