@@ -54,11 +54,8 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
       sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
     fi
 
-# Local/debug build — install sqlite3 CLI for in-container queries of
-# /data/tdai-memory/vectors.db and metadata/*.db. Production image
-# (Dockerfile) intentionally omits sqlite3 to keep the runtime slim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl tini ca-certificates sqlite3 \
+        curl tini ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

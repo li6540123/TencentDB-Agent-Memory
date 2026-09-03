@@ -218,33 +218,24 @@ docker run -d --name memory-hub \
 
 ## 现场查 SQLite（sqlite3 CLI）
 
-合并镜像**默认不**带 `sqlite3`（保持生产最瘦）。本地/调试构建显式带上：
+Hub 合并镜像的 SQLite 数据库**已经挂到宿主机卷**，不必改镜像、也不必 `docker cp`。
+db 路径默认 `${KNOWLEDGE_DB_PATH:-/data/knowledge/knowledge.db}`，落到卷挂载点下。
+
+宿主机装好 `sqlite3`，拿到卷挂载点后**只读**查询即可：
 
 ```bash
-./build.sh IMAGE_TAG=dev WITH_SQLITE3=1
-# 或直接 docker build：
-# docker build --build-arg WITH_SQLITE3=1 -t team-memory-panel-knowledge:dev .
-```
-
-容器内 db 路径默认 `${KNOWLEDGE_DB_PATH:-/data/knowledge/knowledge.db}`，**只读**打开：
-
-```bash
-docker exec tdai-memory-hub sqlite3 --version
-docker exec tdai-memory-hub sqlite3 \
-  'file:/data/knowledge/knowledge.db?mode=ro' '.tables'
-docker exec tdai-memory-hub sqlite3 \
-  'file:/data/knowledge/knowledge.db?mode=ro' \
+# global-images 启栈：默认 PANEL_VOLUME=tdai-panel-data
+# internal-team compose 启栈：默认 tdai-hub-data
+HUB_DIR=$(docker volume inspect tdai-panel-data --format '{{ .Mountpoint }}')
+sqlite3 "file:${HUB_DIR}/knowledge.db?mode=ro" '.tables'
+sqlite3 "file:${HUB_DIR}/knowledge.db?mode=ro" \
   "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
 ```
 
-宿主机侧（`hub-data` 命名卷已挂载时）：
-
-```bash
-HUB_DIR=$(docker volume inspect tdai-hub-data --format '{{ .Mountpoint }}')
-sqlite3 -readonly "${HUB_DIR}/knowledge.db" '.tables'
-```
-
-只读约束、WAL 坑（`docker cp` 单文件不完整）、写库禁入见 `docs/SQLITE-DEBUG.md`。
+务必 `?mode=ro`（避免与业务进程的 `better-sqlite3` 抢锁）。`docker cp` 在 WAL 模式下
+单文件不完整（需 `-wal`/`-shm` 三个一起），走挂载点直读现场文件不存在这个问题。
+完整说明、卷名对照（global-images vs internal-team）、Mac + Colima 适配、故障排查见
+`docs/SQLITE-DEBUG.md`。
 
 ## 常见问题
 

@@ -104,25 +104,25 @@ curl http://localhost:8420/health
 }
 ```
 
-### 4.1 现场查 SQLite（用本地镜像）
+### 4.1 现场查 SQLite（宿主机 sqlite3 只读查挂载卷）
 
-`MemoryCore/Dockerfile.local` 自带 `sqlite3` CLI（生产 `Dockerfile` 刻意保持最瘦）。
-容器内典型 db 路径：
+`memory-core` 的 SQLite 已经被 `deploy/global-images/start-memory-core.sh` 挂成命名卷
+（默认 `tdai-memory-core-data`，可在 `.env` 改 `MEMORY_CORE_VOLUME`）；db 路径
+`/data/tdai-memory/vectors.db` 和 `/data/tdai-memory/metadata/tdai_metadata_<id>/metadata.db`
+落在卷挂载点下。
 
-- `/data/tdai-memory/vectors.db`（记忆索引）
-- `/data/tdai-memory/metadata/tdai_metadata_<id>/metadata.db`（元数据）
+宿主机装好 `sqlite3`，拿到卷挂载点后**只读**查询即可，不必改镜像：
 
 ```bash
-# 容器内直查，不要 cp（cp 单个 .db 在 WAL 模式下不完整）
-docker exec tdai-memory-core sqlite3 'file:/data/tdai-memory/vectors.db?mode=ro' '.tables'
-docker exec tdai-memory-core sqlite3 \
-  'file:/data/tdai-memory/vectors.db?mode=ro' \
+CORE_DIR=$(docker volume inspect tdai-memory-core-data --format '{{ .Mountpoint }}')
+sqlite3 "file:${CORE_DIR}/vectors.db?mode=ro" '.tables'
+sqlite3 "file:${CORE_DIR}/vectors.db?mode=ro" \
   "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
 ```
 
-务必只读打开（`?mode=ro`）；不要写入，避免与 `node:sqlite` 业务连接抢锁。
-卷已挂载时，宿主机 `sqlite3 -readonly "file:${VOL}/vectors.db?mode=ro" ...` 也可作
-为辅助路径。完整说明、宿主机侧示例、WAL 坑与故障排查见 `docs/SQLITE-DEBUG.md`。
+务必 `?mode=ro`（避免与业务进程的 `node:sqlite` 抢锁）。WAL 下 `docker cp` 单个 `.db`
+会缺数据，走挂载点直读现场文件不存在这个问题。完整说明、卷名对照、Mac + Colima 适配、
+故障排查见 `docs/SQLITE-DEBUG.md`。
 
 ## 配置方式
 
