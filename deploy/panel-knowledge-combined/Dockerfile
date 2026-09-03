@@ -49,6 +49,16 @@ RUN npm run build
 FROM base AS runtime
 WORKDIR /app
 
+# WITH_SQLITE3=1 (dev/local only) → 在 runtime 里追加 sqlite3 CLI，便于 docker exec
+# 直查 /data/knowledge/knowledge.db 等本地 SQLite 文件。
+# 默认 0：生产最瘦镜像不带调试工具（详见 docs/SQLITE-DEBUG.md）。
+# 用法：docker build --build-arg WITH_SQLITE3=1 -t team-memory-panel-knowledge:dev .
+ARG WITH_SQLITE3=0
+RUN if [ "$WITH_SQLITE3" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends sqlite3 \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 ENV NODE_ENV=production \
     PANEL_PORT=8125 \
     KNOWLEDGE_PORT=8424 \

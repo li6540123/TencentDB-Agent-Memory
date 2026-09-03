@@ -216,6 +216,36 @@ docker run -d --name memory-hub \
 
 ---
 
+## 现场查 SQLite（sqlite3 CLI）
+
+合并镜像**默认不**带 `sqlite3`（保持生产最瘦）。本地/调试构建显式带上：
+
+```bash
+./build.sh IMAGE_TAG=dev WITH_SQLITE3=1
+# 或直接 docker build：
+# docker build --build-arg WITH_SQLITE3=1 -t team-memory-panel-knowledge:dev .
+```
+
+容器内 db 路径默认 `${KNOWLEDGE_DB_PATH:-/data/knowledge/knowledge.db}`，**只读**打开：
+
+```bash
+docker exec tdai-memory-hub sqlite3 --version
+docker exec tdai-memory-hub sqlite3 \
+  'file:/data/knowledge/knowledge.db?mode=ro' '.tables'
+docker exec tdai-memory-hub sqlite3 \
+  'file:/data/knowledge/knowledge.db?mode=ro' \
+  "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+```
+
+宿主机侧（`hub-data` 命名卷已挂载时）：
+
+```bash
+HUB_DIR=$(docker volume inspect tdai-hub-data --format '{{ .Mountpoint }}')
+sqlite3 -readonly "${HUB_DIR}/knowledge.db" '.tables'
+```
+
+只读约束、WAL 坑（`docker cp` 单文件不完整）、写库禁入见 `docs/SQLITE-DEBUG.md`。
+
 ## 常见问题
 
 ### Q: 容器内访问宿主机服务？

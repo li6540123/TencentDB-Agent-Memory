@@ -139,6 +139,11 @@ if [[ -f "$PROXY_ENV" ]]; then
   BUILD_ARGS=("${DOCKER_BUILD_PROXY_ARGV[@]}")
   echo "[build-combined] docker build 代理=${DOCKER_HTTP_PROXY:-（未配置）}"
 fi
+# 透传 WITH_SQLITE3（默认 0 → 不装 sqlite3；=1 → 装 sqlite3，便于现场 docker exec 只读查 SQLite）
+if [[ "${WITH_SQLITE3:-0}" == "1" ]]; then
+  BUILD_ARGS+=("--build-arg" "WITH_SQLITE3=1")
+  echo "[build-combined] WITH_SQLITE3=1 → 镜像将包含 sqlite3 CLI"
+fi
 docker build --platform "$PLATFORM" "${BUILD_ARGS[@]}" -t "$IMAGE_NAME:$IMAGE_TAG" "$CTX_DIR"
 
 echo ""
