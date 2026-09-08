@@ -49,6 +49,10 @@ import type {
   ConfigParamEntity,
   UpsertConfigParamInput,
   ListConfigParamsFilter,
+  InstanceUpstreamConfigEntity,
+  UpsertInstanceUpstreamConfigInput,
+  InstanceUpstreamConfigFilter,
+  UpstreamConfigType,
 } from "../types.js";
 
 export type MaybePromise<T> = T | Promise<T>;
@@ -216,6 +220,22 @@ export interface IMetadataStore {
   ): MaybePromise<ConfigParamEntity | null>;
   upsertConfigParam(input: UpsertConfigParamInput): MaybePromise<ConfigParamEntity>;
   listConfigParams(filter: ListConfigParamsFilter): MaybePromise<ConfigParamEntity[]>;
+
+  // ── InstanceUpstreamConfig ──
+  getInstanceUpstreamConfig(
+    agentSource: string,
+    type: UpstreamConfigType,
+  ): MaybePromise<InstanceUpstreamConfigEntity | null>;
+  upsertInstanceUpstreamConfig(
+    input: UpsertInstanceUpstreamConfigInput,
+  ): MaybePromise<InstanceUpstreamConfigEntity>;
+  listInstanceUpstreamConfigs(
+    filter?: InstanceUpstreamConfigFilter,
+  ): MaybePromise<InstanceUpstreamConfigEntity[]>;
+  deleteInstanceUpstreamConfig(
+    agentSource: string,
+    type: UpstreamConfigType,
+  ): MaybePromise<boolean>;
 }
 
 /** 后端类型。 */
