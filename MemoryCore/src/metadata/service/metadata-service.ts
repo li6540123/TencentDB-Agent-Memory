@@ -854,6 +854,33 @@ export class MetadataService {
     return this.toPublicUserKey(entity);
   }
 
+  /**
+   * 主人专属明文 reveal：仅 caller.user_id === key.user_id。
+   * 禁止 admin / system_admin 代 reveal（不走 assertUserScope）。
+   * 要求 status=active 且未过期。
+   */
+  async revealUserKeyForOwner(
+    keyId: string,
+    callerUserId?: string,
+  ): Promise<{ key_id: string; key_value: string }> {
+    const entity = await this.store.getUserKeyById(keyId);
+    if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);
+
+    if (!callerUserId || entity.user_id !== callerUserId) {
+      throw new MetadataError("permission_denied", "cannot reveal another user's key");
+    }
+
+    if (entity.status !== "active") {
+      throw new MetadataError("user_key_revoked", "user key has been revoked");
+    }
+
+    if (isUserKeyExpired(entity.expires_at)) {
+      throw new MetadataError("user_key_expired", "Key 已过期，请新建");
+    }
+
+    return { key_id: entity.key_id, key_value: entity.key_value };
+  }
+
   /** 校验调用方有权访问该 key（本人、system_admin 或 bootstrap），返回脱敏详情。 */
   async getUserKeyForCaller(
     keyId: string,

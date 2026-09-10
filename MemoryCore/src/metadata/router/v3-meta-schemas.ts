@@ -127,6 +127,7 @@ export const userKeyListSchema = z.object({
   user_id: z.string().min(1).optional(),
 }).merge(paginationInputSchema);
 export const userKeyGetSchema = z.object({ key_id: nonEmpty });
+export const userKeyRevealSchema = z.object({ key_id: nonEmpty });
 export const userKeyRevokeSchema = z.object({ key_id: nonEmpty });
 export const userKeyUpdateSchema = z.object({
   key_id: nonEmpty,
@@ -491,6 +492,7 @@ export const V3_SCHEMAS = {
   "/v3/meta/user-key/create": userKeyCreateSchema,
   "/v3/meta/user-key/list": userKeyListSchema,
   "/v3/meta/user-key/get": userKeyGetSchema,
+  "/v3/meta/user-key/reveal": userKeyRevealSchema,
   "/v3/meta/user-key/revoke": userKeyRevokeSchema,
   "/v3/meta/user-key/update": userKeyUpdateSchema,
   "/v3/meta/user-key/maas-key/set": userKeyMaasKeySetSchema,

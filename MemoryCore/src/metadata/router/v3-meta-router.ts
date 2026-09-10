@@ -140,6 +140,10 @@ const routeTable: Record<string, Handler> = {
   [`${V3_PREFIX}/user-key/get`]: bind(S.userKeyGetSchema, async (d, c, s) =>
     s.getUserKeyForCaller(d.key_id, c.userId, c.isAdmin, c.isSystemAdmin),
   ),
+  /** owner-only：禁止走 assertUserScope 的 admin 旁路。 */
+  [`${V3_PREFIX}/user-key/reveal`]: bind(S.userKeyRevealSchema, async (d, c, s) =>
+    s.revealUserKeyForOwner(d.key_id, c.userId),
+  ),
   [`${V3_PREFIX}/user-key/revoke`]: bind(S.userKeyRevokeSchema, async (d, c, s) => {
     const entity = await s.rawStore.getUserKeyById(d.key_id);
     if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${d.key_id}`);
@@ -401,6 +405,8 @@ function mapErrorCode(code: string): number {
     case "invalid_user_ids":
       return 400;
     case "user_inactive":
+    case "user_key_expired":
+    case "user_key_revoked":
       return 403;
     case "user_key_not_found":
       return 404;
