@@ -33,7 +33,9 @@ export function canViewUser(
   return ctx.userId === user.user_id;
 }
 
-/** v3.1 公开响应：user_id / user_type / username / created_at。 */
+/** v3.1 公开响应：user_id / user_type / username / created_at。
+ * system_admin 额外可见 external_id / auth_provider（Panel SSO 绑号防护）。
+ */
 export function toPublicUser(user: UserEntity, ctx: V3AuthContext): UserPublic {
   const pub: UserPublic = {
     user_id: user.user_id,
@@ -44,6 +46,11 @@ export function toPublicUser(user: UserEntity, ctx: V3AuthContext): UserPublic {
   if (isSystemAdminUser(user) && !ctx.isAdmin && ctx.userId !== user.user_id) {
     const { user_type: _ut, ...safe } = pub;
     return safe as UserPublic;
+  }
+  // SSO bind 预检：仅 system_admin（实例 api_key）可读认人键；不要下发给普通前端会话。
+  if (ctx.isSystemAdmin) {
+    if (user.external_id) pub.external_id = user.external_id;
+    if (user.auth_provider) pub.auth_provider = user.auth_provider;
   }
   return pub;
 }

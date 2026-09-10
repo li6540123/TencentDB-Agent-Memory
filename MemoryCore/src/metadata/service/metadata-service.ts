@@ -558,10 +558,12 @@ export class MetadataService {
   /**
    * 把外部认证唯一标识绑定到**已有**账号（存量账号接入外部认证）。
    *
-   * 只写 external_id，**不改 auth_provider**——存量账号原本用 user_key 登录，
-   * 绑定后仍可用原 user_key 登录，外部认证只是新增一种入口。
+   * 写入 external_id + auth_provider（与建号域一致，保证 find-by-external 能反查）。
    *
-   * 冲突：该 external_id 已绑到**另一个** user 时抛错，避免一个外部身份对应多个账号。
+   * 冲突：
+   *   - 该 external_id 已绑到**另一个** user → external_id_already_bound
+   *   - 目标账号已有**非占位** external_id 且 ≠ 本次值 → target_already_bound_other_identity
+   *     （禁止静默覆盖别人的公司身份）
    * 幂等：重复绑定同一个 external_id 到同一 user 直接返回。
    */
   async bindExternalIdToUser(
@@ -573,6 +575,15 @@ export class MetadataService {
     const provider = authProvider?.trim() || DEFAULT_AUTH_PROVIDER;
     // 先确认目标账号存在，避免把外部身份绑到不存在的 user 上。
     const user = await this.requireUser(userId);
+
+    const currentExt = user.external_id?.trim() || "";
+    const isPlaceholder = !currentExt || currentExt === userId;
+    if (!isPlaceholder && currentExt !== externalId) {
+      throw new MetadataError(
+        "target_already_bound_other_identity",
+        `user already bound to another external_id: ${currentExt}`,
+      );
+    }
 
     const existing = await this.store.getUserByExternalId(provider, externalId);
     if (existing && existing.user_id !== userId) {

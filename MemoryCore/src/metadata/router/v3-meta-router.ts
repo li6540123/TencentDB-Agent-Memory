@@ -386,6 +386,8 @@ function mapErrorCode(code: string): number {
     case "already_initialized":
     case "last_system_admin":
     case "member_already_exists":
+    case "external_id_already_bound":
+    case "target_already_bound_other_identity":
       return 409;
     case "invalid_credentials":
     case "invalid_password":

@@ -311,6 +311,12 @@ export interface UserPublic {
   user_type: UserType;
   username: string;
   created_at: string;
+  /**
+   * 仅 system_admin 调用方可见（SSO 绑号防护用）。
+   * 普通用户 / admin 列表响应不带，避免把认人键扩散到前端。
+   */
+  external_id?: string;
+  auth_provider?: string;
 }
 
 /** 公开 user/list 可选过滤（internal list-by-instance 另含 status / user_type）。 */
