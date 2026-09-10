@@ -180,15 +180,46 @@ export default function LoginGate({
   // 建号成功后一次性展示自动生成的 user_key（供用户复制到客户端连 proxy）。
   const [createdKey, setCreatedKey] = useState<{ userKey: string; user: PublicUser; instanceId: string } | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // ── OAuth2（公司 IAM）pending 确认：挂在 LoginGate，不走已登录 Router ──
+  const [pendingOauth2, setPendingOauth2] = useState<{
+    token: string;
+    instanceId: string;
+    displayName?: string;
+    loginName: string;
+    email?: string;
+    mode: 'create_or_bind' | 'bind_only';
+  } | null>(null);
+  const [oauth2LoadingPending, setOauth2LoadingPending] = useState(false);
+  const [oauth2BindUserKey, setOauth2BindUserKey] = useState('');
+  const [oauth2BindPreview, setOauth2BindPreview] = useState<{
+    user_id: string;
+    username?: string;
+    email?: string;
+  } | null>(null);
+  const [oauth2Previewing, setOauth2Previewing] = useState(false);
+  const [oauth2Submitting, setOauth2Submitting] = useState(false);
+  /**
+   * confirm-create 一次性 sk-mem。仅对话框展示；进入应用前必须清空，
+   * 禁止 setPanelSession({ userKey: skMem })。
+   */
+  const [oauth2Created, setOauth2Created] = useState<{
+    skMem: string;
+    user: PublicUser;
+    instanceId: string;
+  } | null>(null);
+
   const hasUserKeyMethod = authMethods.some((method) => method.type === 'user_key');
   const showWoaLogin = authMethodsLoaded && authMethods.some((method) => method.type === 'woa');
+  const showOauth2Login = authMethodsLoaded && authMethods.some((method) => method.type === 'oauth2');
   /**
    * user_key 表单始终直接展示 —— 没有"登录方式选择页"这一层。
    *
-   * 开启 iOA 也不再改变默认页：登录页就是 user_key 表单，iOA 只是表单下方的一个
-   * 跳转链接（"使用 iOA 登录"）。两个登录面各自内嵌一条通往对方的链接，点一下直达。
+   * 开启 iOA / IAM 也不再改变默认页：登录页就是 user_key 表单，IdP 只是表单下方的
+   * 跳转入口。两个登录面各自内嵌一条通往对方的链接，点一下直达。
    */
   const showUserKeyLogin = authMethodsLoaded && hasUserKeyMethod;
+  const inAnyConfirm = Boolean(pendingOauth2 || pendingWoa);
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -243,6 +274,58 @@ export default function LoginGate({
     };
   }, [t]);
 
+  /**
+   * OAuth2 callback 302 `/?pending=…` → 在 LoginGate 内拉确认页数据。
+   * 禁止只挂已登录 Router 的 /confirm（未登录进不去）。
+   */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const pendingToken = params.get('pending');
+    if (!pendingToken) return;
+
+    let cancelled = false;
+    setOauth2LoadingPending(true);
+    setError(null);
+    authMethodsApi
+      .getOauth2Pending(pendingToken)
+      .then((view) => {
+        if (cancelled) return;
+        setPendingOauth2({
+          token: pendingToken,
+          instanceId: view.instance_id,
+          displayName: view.display_name,
+          loginName: view.login_name,
+          email: view.email,
+          mode: view.mode,
+        });
+        setInstanceId(view.instance_id);
+        setOauth2BindUserKey('');
+        setOauth2BindPreview(null);
+        setOauth2Created(null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPendingOauth2(null);
+        setError(t('login.oauth2.pendingExpired'));
+        clearPendingQuery();
+      })
+      .finally(() => {
+        if (!cancelled) setOauth2LoadingPending(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
+
+  function clearPendingQuery() {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('pending')) return;
+    url.searchParams.delete('pending');
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({}, '', next);
+  }
+
   /** 提交 user_key：验活通过后直接登录，无效 key 报错（不自动建号）。 */
   async function submit(e?: React.FormEvent) {
     e?.preventDefault();
@@ -290,6 +373,31 @@ export default function LoginGate({
     const auth = toAuthState(user, instanceId, '');
     writeAuthCache(auth);
     onLoggedIn(auth);
+  }
+
+  /**
+   * IdP Cookie 已 Set 后进主界面：优先走 resumeSession（= checkSession 路径），
+   * userKey 保持空串；失败则用确认响应用户兜底。禁止把 sk-mem 写入 panelSession。
+   */
+  async function enterAfterIdpCookie(user: PublicUser | undefined, instanceId: string) {
+    if (user) {
+      setPanelSession({
+        authMethod: 'idp',
+        instanceId,
+        userKey: '',
+        user,
+      });
+    }
+    const auth = await resumeSession();
+    if (auth) {
+      onLoggedIn(auth);
+      return;
+    }
+    if (user) {
+      enterWithAuth(user, instanceId);
+      return;
+    }
+    setError(t('login.error.noUser'));
   }
 
   /**
@@ -400,6 +508,116 @@ export default function LoginGate({
     if (instanceId) authMethodsApi.loginWoa(instanceId);
   }
 
+  function loginOauth2() {
+    if (!instanceId) {
+      setError(t('login.error.selectInstance'));
+      return;
+    }
+    authMethodsApi.loginOauth2(instanceId);
+  }
+
+  function dismissOauth2Pending() {
+    setPendingOauth2(null);
+    setOauth2BindUserKey('');
+    setOauth2BindPreview(null);
+    setOauth2Created(null);
+    setCopied(false);
+    setError(null);
+    clearPendingQuery();
+  }
+
+  async function createOauth2Account() {
+    if (!pendingOauth2 || pendingOauth2.mode === 'bind_only') return;
+    setOauth2Submitting(true);
+    setError(null);
+    try {
+      const result = await authMethodsApi.confirmOauth2Create(pendingOauth2.token);
+      if (!result.user) throw new Error(t('login.error.noUser'));
+      const skMem = result.user_key?.trim();
+      if (skMem) {
+        // 一次性展示 sk-mem；绝不写入 setPanelSession.userKey / localStorage。
+        setOauth2Created({
+          skMem,
+          user: result.user,
+          instanceId: result.instance_id,
+        });
+        setCopied(false);
+        setOauth2Submitting(false);
+        return;
+      }
+      // 无明文 key（异常兜底）：直接靠 Cookie 进应用。
+      clearPendingQuery();
+      setPendingOauth2(null);
+      await enterAfterIdpCookie(result.user, result.instance_id);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setOauth2Submitting(false);
+    }
+  }
+
+  /** 关闭 sk-mem 对话框：先清空 React state 中的明文，再 checkSession 进主界面。 */
+  async function finishOauth2CreateEnter() {
+    const snapshot = oauth2Created;
+    setOauth2Created(null);
+    setCopied(false);
+    setPendingOauth2(null);
+    clearPendingQuery();
+    if (!snapshot) return;
+    setOauth2Submitting(true);
+    setError(null);
+    try {
+      await enterAfterIdpCookie(snapshot.user, snapshot.instanceId);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setOauth2Submitting(false);
+    }
+  }
+
+  async function previewOauth2Bind() {
+    if (!pendingOauth2) return;
+    const key = oauth2BindUserKey.trim();
+    if (!key) {
+      setError(t('login.oauth2.userKeyRequired'));
+      return;
+    }
+    setOauth2Previewing(true);
+    setError(null);
+    try {
+      setOauth2BindPreview(await authMethodsApi.previewOauth2Bind(pendingOauth2.token, key));
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setOauth2BindPreview(null);
+    } finally {
+      setOauth2Previewing(false);
+    }
+  }
+
+  async function confirmOauth2BindAction() {
+    if (!pendingOauth2) return;
+    const key = oauth2BindUserKey.trim();
+    if (!key) {
+      setError(t('login.oauth2.userKeyRequired'));
+      return;
+    }
+    if (!oauth2BindPreview) {
+      await previewOauth2Bind();
+      return;
+    }
+    setOauth2Submitting(true);
+    setError(null);
+    try {
+      const result = await authMethodsApi.confirmOauth2Bind(pendingOauth2.token, key);
+      setPendingOauth2(null);
+      setOauth2BindUserKey('');
+      setOauth2BindPreview(null);
+      clearPendingQuery();
+      await enterAfterIdpCookie(result.user, result.instance_id);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setOauth2Submitting(false);
+    }
+  }
+
   return (
     <div className="_tdai-login">
       {/* 明亮点阵波纹动效背景（纯 Canvas，零外部依赖） */}
@@ -419,6 +637,139 @@ export default function LoginGate({
 
           <h1 className="_tdai-login-title">{t('login.welcome')}</h1>
           <p className="_tdai-login-subtitle">{t('login.tagline')}</p>
+
+          {oauth2LoadingPending && !pendingOauth2 && (
+            <p className="_tdai-login-hint _tdai-login-pending-loading">{t('login.oauth2.loadingPending')}</p>
+          )}
+
+          {/* OAuth2：一次性 sk-mem 对话框（关闭时清空明文 state） */}
+          {pendingOauth2 && oauth2Created && (
+            <div className="_tdai-login-pending">
+              <h2 className="_tdai-login-pending-title">{t('login.oauth2.keyReadyTitle')}</h2>
+              <p className="_tdai-login-hint">{t('login.oauth2.keyReadyHint')}</p>
+
+              <div className="_tdai-login-field">
+                <p className="_tdai-login-field-label">{t('login.oauth2.yourUserKey')}</p>
+                <Input size="full" value={oauth2Created.skMem} readonly />
+                <Button
+                  className="_tdai-login-copy"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(oauth2Created.skMem);
+                    setCopied(true);
+                  }}
+                >
+                  {copied ? t('login.oauth2.copied') : t('login.oauth2.copyKey')}
+                </Button>
+                <p className="_tdai-login-hint _tdai-login-warn">{t('login.oauth2.keyReadyWarn')}</p>
+              </div>
+
+              <Button
+                type="primary"
+                className="_tdai-login-submit"
+                loading={oauth2Submitting}
+                disabled={oauth2Submitting}
+                onClick={() => void finishOauth2CreateEnter()}
+              >
+                {t('login.oauth2.savedEnter')}
+              </Button>
+            </div>
+          )}
+
+          {/* OAuth2：首次确认（自动建号 / 绑老号）；mode=bind_only 隐藏自动建号 */}
+          {pendingOauth2 && !oauth2Created && (
+            <div className="_tdai-login-pending">
+              <h2 className="_tdai-login-pending-title">{t('login.oauth2.pendingTitle')}</h2>
+              <p className="_tdai-login-hint">
+                {t('login.oauth2.pendingIdentity', {
+                  name: pendingOauth2.displayName || pendingOauth2.loginName,
+                })}
+              </p>
+              {pendingOauth2.email && (
+                <p className="_tdai-login-hint">
+                  {t('login.oauth2.pendingEmail', { email: pendingOauth2.email })}
+                </p>
+              )}
+              <p className="_tdai-login-hint">
+                {pendingOauth2.mode === 'bind_only'
+                  ? t('login.oauth2.bindOnlyHint')
+                  : t('login.oauth2.createHint')}
+              </p>
+
+              {pendingOauth2.mode !== 'bind_only' && (
+                <Button
+                  type="primary"
+                  className="_tdai-login-submit"
+                  onClick={() => void createOauth2Account()}
+                  loading={oauth2Submitting}
+                  disabled={oauth2Submitting || oauth2Previewing}
+                >
+                  {t('login.oauth2.createAccount')}
+                </Button>
+              )}
+
+              <div className="_tdai-login-field">
+                <p className="_tdai-login-field-label">{t('login.oauth2.bindSection')}</p>
+                <p className="_tdai-login-field-label">{t('login.oauth2.userKeyLabel')}</p>
+                <Input
+                  size="full"
+                  value={oauth2BindUserKey}
+                  onChange={(value) => {
+                    setOauth2BindUserKey(value);
+                    setOauth2BindPreview(null);
+                    setError(null);
+                  }}
+                  placeholder={t('login.oauth2.userKeyPlaceholder')}
+                  disabled={oauth2Submitting}
+                />
+              </div>
+
+              {oauth2BindPreview && (
+                <div className="_tdai-login-alert">
+                  <Alert type="info">
+                    {t('login.oauth2.previewHint', {
+                      name:
+                        oauth2BindPreview.username
+                        || oauth2BindPreview.email
+                        || oauth2BindPreview.user_id,
+                    })}
+                  </Alert>
+                </div>
+              )}
+
+              {error && (
+                <div className="_tdai-login-alert">
+                  <Alert type="error">{error}</Alert>
+                </div>
+              )}
+
+              <Button
+                type={pendingOauth2.mode === 'bind_only' ? 'primary' : 'weak'}
+                className="_tdai-login-submit"
+                onClick={() => void confirmOauth2BindAction()}
+                loading={oauth2Submitting || oauth2Previewing}
+                disabled={
+                  oauth2Submitting
+                  || oauth2Previewing
+                  || !oauth2BindUserKey.trim()
+                }
+              >
+                {!oauth2BindPreview
+                  ? t('login.oauth2.previewNext')
+                  : t('login.oauth2.confirmBind')}
+              </Button>
+
+              <div className="_tdai-login-switch">
+                <Button
+                  type="link"
+                  className="_tdai-login-switch-link"
+                  onClick={dismissOauth2Pending}
+                  disabled={oauth2Submitting}
+                >
+                  {t('login.oauth2.dismiss')}
+                </Button>
+              </div>
+            </div>
+          )}
 
           {pendingWoa && createdKey && (
             <div className="_tdai-login-pending">
@@ -546,7 +897,7 @@ export default function LoginGate({
             </div>
           )}
 
-          {!pendingWoa && showUserKeyLogin && (
+          {!inAnyConfirm && showUserKeyLogin && (
             <form onSubmit={submit} className="_tdai-login-form">
             {/* 记忆实例选择 — GET /api/v1/meta/instances */}
             <div className="_tdai-login-field">
@@ -609,18 +960,69 @@ export default function LoginGate({
             </form>
           )}
 
-          {/* user_key 表单下方的 iOA 跳转入口：开启 iOA 时直接跳过去，不经选择页 */}
-          {!pendingWoa && showWoaLogin && showUserKeyLogin && instanceId && (
-            <div className="_tdai-login-switch">
+          {/* 仅 oauth2、无 user_key：仍需选实例再点公司 IAM */}
+          {!inAnyConfirm && !showUserKeyLogin && showOauth2Login && (
+            <div className="_tdai-login-form">
+              <div className="_tdai-login-field">
+                <label className="_tdai-login-label" htmlFor="tdai-login-instance-oauth2">
+                  {t('login.field.instance')}
+                </label>
+                <Select
+                  appearance="button"
+                  size="full"
+                  value={instanceId}
+                  onChange={(value) => {
+                    setInstanceId(value);
+                    setError(null);
+                  }}
+                  disabled={instances.length === 0}
+                  placeholder={
+                    instancesError ? t('login.placeholder.instanceError') : t('login.placeholder.instance')
+                  }
+                  options={instances.map((inst) => ({ value: inst.instance_id, text: inst.name }))}
+                  boxSizeSync
+                />
+              </div>
+              {error && (
+                <div className="_tdai-login-alert">
+                  <Alert type="error">{error}</Alert>
+                </div>
+              )}
               <Button
-                type="link"
-                className="_tdai-login-switch-link"
-                onClick={() => void switchToWoa()}
-                loading={resumingWoa}
-                disabled={submitting || resumingWoa}
+                type="primary"
+                className="_tdai-login-submit"
+                onClick={loginOauth2}
+                disabled={!instanceId}
               >
-                {t('login.useWoa')}
+                {t('login.useOauth2')}
               </Button>
+            </div>
+          )}
+
+          {/* user_key 表单下方的 IdP 跳转入口：开启时直接跳过去，不经选择页 */}
+          {!inAnyConfirm && showUserKeyLogin && instanceId && (showOauth2Login || showWoaLogin) && (
+            <div className="_tdai-login-switch _tdai-login-idp-links">
+              {showOauth2Login && (
+                <Button
+                  type="link"
+                  className="_tdai-login-switch-link"
+                  onClick={loginOauth2}
+                  disabled={submitting}
+                >
+                  {t('login.useOauth2')}
+                </Button>
+              )}
+              {showWoaLogin && (
+                <Button
+                  type="link"
+                  className="_tdai-login-switch-link"
+                  onClick={() => void switchToWoa()}
+                  loading={resumingWoa}
+                  disabled={submitting || resumingWoa}
+                >
+                  {t('login.useWoa')}
+                </Button>
+              )}
             </div>
           )}
         </div>

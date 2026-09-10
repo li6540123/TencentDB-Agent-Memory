@@ -29,6 +29,40 @@ export interface AuthMethod {
   enabled: boolean;
 }
 
+/** GET /auth/idp/oauth2/pending — 确认页展示身份（不含 sk-mem）。 */
+export interface Oauth2PendingView {
+  instance_id: string;
+  display_name?: string;
+  login_name: string;
+  email?: string;
+  mode: 'create_or_bind' | 'bind_only';
+  expires_at: number;
+}
+
+export interface Oauth2ConfirmCreateResult {
+  authenticated: boolean;
+  instance_id: string;
+  user_id: string;
+  user?: PublicUser;
+  /** 一次性 sk-mem；仅对话框展示，禁止写入 localStorage / panelSession.userKey */
+  user_key?: string;
+  redirect_url?: string;
+}
+
+export interface Oauth2BindPreviewResult {
+  user_id: string;
+  username?: string;
+  email?: string;
+}
+
+export interface Oauth2ConfirmBindResult {
+  authenticated: boolean;
+  instance_id: string;
+  user_id: string;
+  user?: PublicUser;
+  redirect_url?: string;
+}
+
 /**
  * user_key 登录（兼容用户自持 key）。
  *
@@ -146,50 +180,32 @@ export const authMethodsApi = {
    */
   resumeWoa: () => request<{ ok: boolean }>('POST', '/api/v1/auth/idp/woa/resume'),
 
-  /** OAuth2 首次确认：读取 pending 展示身份（无 sk-mem）。 */
+  /** OAuth2 首次确认：读取 pending 展示身份（无 sk-mem）。供 LoginGate 挂载确认 UI。 */
   getOauth2Pending: (pendingToken: string) =>
-    request<{
-      instance_id: string;
-      display_name?: string;
-      login_name: string;
-      email?: string;
-      mode: 'create_or_bind' | 'bind_only';
-      expires_at: number;
-    }>('GET', `/api/v1/auth/idp/oauth2/pending?pending=${encodeURIComponent(pendingToken)}`),
+    request<Oauth2PendingView>(
+      'GET',
+      `/api/v1/auth/idp/oauth2/pending?pending=${encodeURIComponent(pendingToken)}`,
+    ),
 
-  /** OAuth2 自动建号；成功响应带 Set-Cookie。user_key 仅此一次，禁止写入 localStorage。 */
+  /**
+   * OAuth2 自动建号；成功响应带 Set-Cookie。
+   * `user_key`（sk-mem）仅此一次展示：禁止写入 localStorage / setPanelSession.userKey。
+   */
   confirmOauth2Create: (pendingToken: string) =>
-    request<{
-      authenticated: boolean;
-      instance_id: string;
-      user_id: string;
-      user?: PublicUser;
-      user_key?: string;
-      redirect_url?: string;
-    }>('POST', '/api/v1/auth/idp/oauth2/confirm-create', {
+    request<Oauth2ConfirmCreateResult>('POST', '/api/v1/auth/idp/oauth2/confirm-create', {
       pending_token: pendingToken,
     }),
 
   /** OAuth2 绑老号预览（不消费 pending）。 */
   previewOauth2Bind: (pendingToken: string, userKey: string) =>
-    request<{
-      user_id: string;
-      username?: string;
-      email?: string;
-    }>('POST', '/api/v1/auth/idp/oauth2/confirm-bind/preview', {
+    request<Oauth2BindPreviewResult>('POST', '/api/v1/auth/idp/oauth2/confirm-bind/preview', {
       pending_token: pendingToken,
       user_key: userKey,
     }),
 
   /** OAuth2 绑老号确认；成功响应带 Set-Cookie。 */
   confirmOauth2Bind: (pendingToken: string, userKey: string) =>
-    request<{
-      authenticated: boolean;
-      instance_id: string;
-      user_id: string;
-      user?: PublicUser;
-      redirect_url?: string;
-    }>('POST', '/api/v1/auth/idp/oauth2/confirm-bind', {
+    request<Oauth2ConfirmBindResult>('POST', '/api/v1/auth/idp/oauth2/confirm-bind', {
       pending_token: pendingToken,
       user_key: userKey,
     }),

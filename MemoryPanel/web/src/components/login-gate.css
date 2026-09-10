@@ -181,6 +181,18 @@
   text-align: center;
 }
 
+._tdai-login-idp-links {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+._tdai-login-pending-loading {
+  margin-top: 24px;
+  text-align: center;
+}
+
 ._tdai-login-switch ._tdai-login-switch-link.tea-btn {
   height: auto;
   padding: 0;

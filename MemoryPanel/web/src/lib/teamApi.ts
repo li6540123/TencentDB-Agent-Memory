@@ -32,6 +32,10 @@ export {
   environmentBindingsApi,
   type AuthMethod,
   type EnvironmentBinding,
+  type Oauth2PendingView,
+  type Oauth2ConfirmCreateResult,
+  type Oauth2BindPreviewResult,
+  type Oauth2ConfirmBindResult,
 } from './api/auth';
 
 // ── Teams + Members ──
