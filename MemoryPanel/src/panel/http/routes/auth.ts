@@ -44,6 +44,19 @@ function handleAuthError(c: Context, err: unknown): Response {
   throw err;
 }
 
+/**
+ * OAuth2 callback 是浏览器整页导航目标：失败时不能吐 JSON，否则用户停在
+ * `/api/v1/auth/idp/oauth2/callback?...` 空白页。302 回 SPA 根路径；
+ * `sso_error` 仅短错误码（invalid_state / invalid_code / …），不带 IdP/密钥细节。
+ */
+function oauth2CallbackErrorRedirect(c: Context, err: unknown): Response {
+  let code = 'sso_failed';
+  if (err instanceof PanelAuthError && /^[a-z][a-z0-9_]{0,63}$/i.test(err.code)) {
+    code = err.code;
+  }
+  return c.redirect(`/?sso_error=${encodeURIComponent(code)}`, 302);
+}
+
 function readBodyString(body: Record<string, unknown>, ...keys: string[]): string {
   for (const key of keys) {
     const value = body[key];
@@ -292,6 +305,11 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
 
   api.get('/auth/idp/oauth2/callback', async (c: Context) => {
     if (!isOauth2Enabled()) return c.redirect('/', 302);
+    // IdP 拒登常见形态：?error=access_denied&state=…（无 code）
+    const idpError = c.req.query('error');
+    if (idpError) {
+      return c.redirect('/?sso_error=idp_error', 302);
+    }
     try {
       const result = await deps.auth.completeOauth2Callback({
         state: c.req.query('state'),
@@ -310,7 +328,7 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
       // 首次确认：不 Set-Cookie；pending 走 query 进 LoginGate。
       return c.redirect(`/?pending=${encodeURIComponent(result.pending.pendingToken)}`, 302);
     } catch (err) {
-      return handleAuthError(c, err);
+      return oauth2CallbackErrorRedirect(c, err);
     }
   });
 

@@ -55,6 +55,8 @@ Panel 填 `http://...` 仓库地址即可；token 不落盘。
 | `PANEL_AUTH_OAUTH2_APP_URL` | 是（Hub 对外根，如 `http://<PUBLIC_HOST>:8125`） |
 | `METADATA_EXTERNAL_AUTH_PROVIDER` | 建议 `iam` |
 
+> **注意：** 仅开公司 IAM（oauth2）时请设 `METADATA_EXTERNAL_AUTH_PROVIDER=iam`。不要在未单独评估的情况下，用同一个 `METADATA_EXTERNAL_AUTH_PROVIDER` 域同时启用 WOA 与 oauth2——两边会争用同一外部身份命名空间，绑定/反查易串。
+
 占位见 `.env.example` / `.env.company.example` 末尾（值为空，填真值后再 `./up.sh`）。可选：`PANEL_AUTH_OAUTH2_REDIRECT_URI`、`SCOPE`、`DISPLAY_NAME`、`PKCE`、`PANEL_AUTH_SESSION_SECURE`（http 内网时可显式 `false`）。
 
 **redirect_uri：** 向架构部登记，须与 Hub 实际回调完全一致。默认：

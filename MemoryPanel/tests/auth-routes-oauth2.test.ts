@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PanelAuthService } from '../src/panel/auth/service.js';
+import { encryptSecret } from '../src/panel/auth/identity-store.js';
 import type { ExternalIdentity } from '../src/panel/auth/types.js';
 import type { PanelAuthConfig } from '../src/panel/config/panel-config.js';
 import { InstanceRegistry } from '../src/panel/config/instance-registry.js';
@@ -90,6 +91,27 @@ function makeIdentity(overrides: Partial<ExternalIdentity> = {}): ExternalIdenti
     claims: {},
     ...overrides,
   };
+}
+
+function seedBinding(identityStorePath: string, plainUserKey: string): void {
+  writeFileSync(
+    identityStorePath,
+    JSON.stringify({
+      version: 1,
+      bindings: [
+        {
+          instanceId: 'inst-1',
+          providerId: 'oauth2',
+          externalSubject: 'alice@example.com',
+          coreUserId: 'usr-1',
+          encryptedUserKey: encryptSecret(plainUserKey, SESSION_SECRET),
+          displayName: 'Alice',
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+    'utf8',
+  );
 }
 
 describe('oauth2 auth routes', () => {
@@ -187,18 +209,22 @@ describe('oauth2 auth routes', () => {
     expect(location).toContain('state=');
     expect(location).toContain('client_id=cid');
 
-    // callback without prior state → invalid_state
+    // callback without prior state → 302 /?sso_error=invalid_state（勿吐 JSON）
     const missing = await app.request('/auth/idp/oauth2/callback?code=abc&state=no-such-state');
-    expect(missing.status).toBe(400);
-    const body = await missing.json();
-    expect(body.message).toBe('invalid_state');
+    expect(missing.status).toBe(302);
+    expect(missing.headers.get('location')).toBe('/?sso_error=invalid_state');
   });
 
-  it('callback without state returns invalid_state', async () => {
+  it('callback without state redirects with sso_error=invalid_state', async () => {
     const res = await app.request('/auth/idp/oauth2/callback?code=abc');
-    expect(res.status).toBe(400);
-    const body = await res.json();
-    expect(body.message).toBe('invalid_state');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe('/?sso_error=invalid_state');
+  });
+
+  it('callback IdP error query redirects with sso_error=idp_error', async () => {
+    const res = await app.request('/auth/idp/oauth2/callback?error=access_denied&state=whatever');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe('/?sso_error=idp_error');
   });
 
   it('callback first login redirects to /?pending= and consumes state once', async () => {
@@ -219,10 +245,79 @@ describe('oauth2 auth routes', () => {
     expect(view.email).toBe('alice@example.com');
     expect(view.mode).toBe('create_or_bind');
 
-    // state 一次性：重放失败
+    // state 一次性：重放 → 302 sso_error（勿吐 JSON）
     const replay = await app.request(`/auth/idp/oauth2/callback?code=auth-code&state=${state}`);
-    expect(replay.status).toBe(400);
-    expect((await replay.json()).message).toBe('invalid_state');
+    expect(replay.status).toBe(302);
+    expect(replay.headers.get('location')).toBe('/?sso_error=invalid_state');
+  });
+
+  it('callback existing user sets session Cookie and redirects to return_to', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'auth-routes-oauth2-existing-'));
+    const identityStorePath = join(tempDir, 'identities.json');
+    seedBinding(identityStorePath, 'sk-mem-existing-user-key');
+    const authConfig = makeConfig(identityStorePath);
+
+    fetchMock = vi.fn(async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes('/token')) {
+        return new Response(JSON.stringify({ access_token: 'at-1' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (href.includes('/userinfo')) {
+        return new Response(
+          JSON.stringify({
+            email: 'alice@example.com',
+            username: 'alice',
+            nickname: 'Alice',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const existingService = new PanelAuthService({
+      config: authConfig,
+      instances: makeInstances(),
+      metaKernel: {
+        invoke: async (action, body) => {
+          if (action === 'auth/verify') {
+            return ok({
+              valid: true,
+              user_id: 'usr-1',
+              user: {
+                user_id: 'usr-1',
+                username: 'alice',
+                email: 'alice@example.com',
+                display_name: 'Alice',
+                user_type: 'human',
+              },
+            });
+          }
+          if (action === 'user/update') return ok({ user_id: body.user_id });
+          return ok(null);
+        },
+      },
+      logger: makeLogger(),
+    });
+    const existingApp = new Hono();
+    registerAuthRoutes(existingApp, {
+      auth: existingService,
+      config: { auth: authConfig },
+    } as PanelDeps);
+
+    const login = await existingApp.request('/auth/idp/oauth2/login?instance_id=inst-1&return_to=/teams');
+    const state = new URL(login.headers.get('location')!).searchParams.get('state')!;
+
+    const cb = await existingApp.request(`/auth/idp/oauth2/callback?code=auth-code&state=${state}`);
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get('location')).toBe('/teams');
+    const setCookie = cb.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('tdai_idp_session=');
+    expect(setCookie).toContain('SameSite=Lax');
   });
 
   it('GET pending returns pending_expired for missing/expired token', async () => {

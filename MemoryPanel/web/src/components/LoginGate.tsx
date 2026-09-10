@@ -526,6 +526,36 @@ export default function LoginGate({
     clearPendingQuery();
   }
 
+  /** create/bind 失败若 pending 已过期，清确认 UI + URL，避免用户反复点进过期态。 */
+  function isOauth2PendingExpiredError(err: unknown): boolean {
+    if (!(err instanceof Error) || err.name !== 'ApiError') return false;
+    const apiErr = err as Error & { rawMessage?: string; body?: string };
+    const candidates = [apiErr.rawMessage, apiErr.message];
+    if (typeof apiErr.body === 'string' && apiErr.body.trim().startsWith('{')) {
+      try {
+        const env = JSON.parse(apiErr.body) as { message?: string };
+        if (typeof env.message === 'string') candidates.push(env.message);
+      } catch {
+        /* ignore */
+      }
+    }
+    return candidates.some((c) =>
+      c === 'pending_expired'
+      || c === 'WOA_LOGIN_EXPIRED'
+      || c === 'WOA_LOGIN_PENDING_REQUIRED',
+    );
+  }
+
+  function clearOauth2PendingExpiredUi() {
+    setPendingOauth2(null);
+    setOauth2BindUserKey('');
+    setOauth2BindPreview(null);
+    setOauth2Created(null);
+    setCopied(false);
+    clearPendingQuery();
+    setError(t('login.oauth2.pendingExpired'));
+  }
+
   async function createOauth2Account() {
     if (!pendingOauth2 || pendingOauth2.mode === 'bind_only') return;
     setOauth2Submitting(true);
@@ -550,7 +580,11 @@ export default function LoginGate({
       setPendingOauth2(null);
       await enterAfterIdpCookie(result.user, result.instance_id);
     } catch (err) {
-      setError(getErrorMessage(err));
+      if (isOauth2PendingExpiredError(err)) {
+        clearOauth2PendingExpiredUi();
+      } else {
+        setError(getErrorMessage(err));
+      }
       setOauth2Submitting(false);
     }
   }
@@ -613,7 +647,11 @@ export default function LoginGate({
       clearPendingQuery();
       await enterAfterIdpCookie(result.user, result.instance_id);
     } catch (err) {
-      setError(getErrorMessage(err));
+      if (isOauth2PendingExpiredError(err)) {
+        clearOauth2PendingExpiredUi();
+      } else {
+        setError(getErrorMessage(err));
+      }
       setOauth2Submitting(false);
     }
   }
