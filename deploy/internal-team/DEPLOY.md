@@ -42,7 +42,7 @@ Panel 填 `http://...` 仓库地址即可；token 不落盘。
 
 ## Hub Panel 公司 IAM（OAuth2 SSO）
 
-默认仅 `user_key`（`.admin-key` 登录）。要开 IAM SSO，在测试机 `.env` 填写（**只写机器 `.env`，勿提交 git**）：
+默认仅 `user_key`（`.admin-key` 登录）。要开 IAM SSO，在测试机 `.env` 填写（**只写机器 `.env`，勿提交 git**）；`./up.sh` 经 `docker-compose.yml` 把这些变量传入 `memory-hub` 容器。
 
 | 变量 | 必填（`PANEL_AUTH_MODE` 含 `oauth2` 时） |
 |------|------|
@@ -55,7 +55,7 @@ Panel 填 `http://...` 仓库地址即可；token 不落盘。
 | `PANEL_AUTH_OAUTH2_APP_URL` | 是（Hub 对外根，如 `http://<PUBLIC_HOST>:8125`） |
 | `METADATA_EXTERNAL_AUTH_PROVIDER` | 建议 `iam` |
 
-占位见 `.env.company.example` 末尾（值为空，填真值后再 `./up.sh`）。
+占位见 `.env.example` / `.env.company.example` 末尾（值为空，填真值后再 `./up.sh`）。可选：`PANEL_AUTH_OAUTH2_REDIRECT_URI`、`SCOPE`、`DISPLAY_NAME`、`PKCE`、`PANEL_AUTH_SESSION_SECURE`（http 内网时可显式 `false`）。
 
 **redirect_uri：** 向架构部登记，须与 Hub 实际回调完全一致。默认：
 
