@@ -67,7 +67,17 @@ Panel 填 `http://...` 仓库地址即可；token 不落盘。
 
 例：`http://<PUBLIC_HOST>:8125/api/v1/auth/idp/oauth2/callback`。网关剥端口或 https 终结时，用 `PANEL_AUTH_OAUTH2_REDIRECT_URI` 覆盖拼出的值。
 
-**会话存储：** 单机内网默认进程内内存会话，**不必**另配 `PANEL_SESSION_STORE=redis`（compose 里的 Redis 仍给 Proxy 会话用，与 IAM 登录无关）。Hub 容器重启后会话需重新 SSO。
+**会话存储（IAM Cookie）：** 默认内存；Hub 重启会丢 SSO 登录。要重启不掉线，在 `.env` 打开（与 Proxy **共用** compose 里的 Redis，前缀隔离）：
+
+```bash
+PANEL_SESSION_STORE=redis
+PANEL_REDIS_HOST=redis
+PANEL_REDIS_PORT=6379
+PANEL_REDIS_PASSWORD=   # 与 REDIS_PASSWORD 相同即可；compose 已默认回落 REDIS_PASSWORD
+PANEL_REDIS_KEY_PREFIX=panel:
+```
+
+本机查看 Redis：`127.0.0.1:6379`，key 前缀 `panel:` 为 Hub 会话；`inj:` 等为 Proxy。
 
 ## 记忆向量 embedding（Qwen3）
 

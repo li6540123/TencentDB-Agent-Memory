@@ -30,6 +30,8 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   // 被 unauthorized: invalid_user_key 模式误配成"key 无效"，与真实原因（建号失败）
   // 完全不符，严重误导排查。
   'USER_CREATE_FAILED',
+  // 吊销最后一把 active sk-mem：内核硬拦截，须友好文案，勿直接甩英文码。
+  'LAST_KEY_CANNOT_REVOKE',
 ]);
 
 /**
@@ -74,6 +76,7 @@ function getPriorityPatterns(): Array<[RegExp, string]> {
   return [
     [/visibility[_\s-]?restricted/i, i18n.t('error.ASSET_PRIVATE_INACCESSIBLE')],
     [/asset_not_bindable/i, i18n.t('error.ASSET_NOT_BINDABLE')],
+    [/last_key_cannot_revoke/i, i18n.t('error.LAST_KEY_CANNOT_REVOKE')],
   ];
 }
 

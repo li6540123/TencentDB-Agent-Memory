@@ -114,6 +114,7 @@ export default function ApiKeyPanel() {
   const [revealingId, setRevealingId] = useState<string | null>(null);
 
   const effectiveHint = formatMaasCacheTtlHint(getMaasCacheTtlMs(), t);
+  const activeKeyCount = keys.filter((k) => !k.revoked_at).length;
 
   function isKeyExpired(key: UserKey): boolean {
     if (!key.expires_at) return false;
@@ -126,6 +127,11 @@ export default function ApiKeyPanel() {
     if (key.revoked_at) return false;
     if (key.user_id && auth?.user_id && key.user_id !== auth.user_id) return false;
     return true;
+  }
+
+  /** 最后一把 active key 禁止吊销（与 Core last_key_cannot_revoke 对齐）。 */
+  function isLastActiveKey(key: UserKey): boolean {
+    return !key.revoked_at && activeKeyCount <= 1;
   }
 
   async function handleRevealCopy(key: UserKey) {
@@ -166,6 +172,10 @@ export default function ApiKeyPanel() {
   }
 
   async function handleDelete(key: UserKey) {
+    if (isLastActiveKey(key)) {
+      tea.notify.warning(t('apiKey.revoke.lastDisabled'));
+      return;
+    }
     const ok = await tea.confirm({
       message: t('apiKey.confirm.revoke', { name: key.key_prefix || key.key_id }),
       description: t('apiKey.confirm.revoke.desc'),
@@ -387,15 +397,19 @@ export default function ApiKeyPanel() {
               header: t('apiKey.table.actions'),
               width: 100,
               align: 'right',
-              render: (key) => (
+              render: (key) => {
+                const lastOnly = isLastActiveKey(key);
+                return (
                 <Button
                   type="text"
-                  disabled={!!key.revoked_at}
+                  disabled={!!key.revoked_at || lastOnly}
+                  title={lastOnly ? t('apiKey.revoke.lastDisabled') : undefined}
                   onClick={() => void handleDelete(key)}
                 >
                   {t('apiKey.revoke')}
                 </Button>
-              ),
+                );
+              },
             },
           ]}
           addons={[

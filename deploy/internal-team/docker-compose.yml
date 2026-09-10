@@ -5,6 +5,9 @@ services:
     image: ${REDIS_IMAGE:-redis:7-alpine}
     container_name: tdai-redis
     restart: unless-stopped
+    ports:
+      # 仅本机可连，方便用 redis-cli / RedisInsight 查看；线上可去掉或改端口
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     command:
       - redis-server
       - --appendonly
@@ -90,9 +93,19 @@ services:
       PANEL_AUTH_OAUTH2_PKCE: "${PANEL_AUTH_OAUTH2_PKCE:-}"
       METADATA_EXTERNAL_AUTH_PROVIDER: "${METADATA_EXTERNAL_AUTH_PROVIDER:-}"
       PANEL_AUTH_SESSION_SECURE: "${PANEL_AUTH_SESSION_SECURE:-}"
+      # Hub IAM 会话存 Redis（与 Proxy 共用同一 Redis，key 前缀 panel: 隔离）
+      PANEL_SESSION_STORE: "${PANEL_SESSION_STORE:-}"
+      PANEL_REDIS_URL: "${PANEL_REDIS_URL:-}"
+      PANEL_REDIS_HOST: "${PANEL_REDIS_HOST:-}"
+      PANEL_REDIS_PORT: "${PANEL_REDIS_PORT:-}"
+      PANEL_REDIS_PASSWORD: "${PANEL_REDIS_PASSWORD:-${REDIS_PASSWORD:-}}"
+      PANEL_REDIS_DB: "${PANEL_REDIS_DB:-}"
+      PANEL_REDIS_KEY_PREFIX: "${PANEL_REDIS_KEY_PREFIX:-}"
     depends_on:
       memory-core:
         condition: service_started
+      redis:
+        condition: service_healthy
     networks: [tdai]
 
   proxy:

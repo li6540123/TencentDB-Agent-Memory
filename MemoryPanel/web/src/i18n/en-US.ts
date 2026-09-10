@@ -1127,6 +1127,7 @@ export const enUS = {
   'apiKey.revoked': 'Revoked',
   'apiKey.neverExpire': 'Never Expires',
   'apiKey.revoke': 'Revoke',
+  'apiKey.revoke.lastDisabled': 'This is the last active key and cannot be revoked. Create another key first.',
   'apiKey.confirm.revoke': 'Revoke Key "{{name}}"?',
   'apiKey.confirm.revoke.desc':
     'After revocation, the corresponding client will immediately lose access. This is irreversible.',
@@ -1302,6 +1303,7 @@ export const enUS = {
   'error.NOT_TEAM_MEMBER': 'You are not a member of this team and cannot perform this operation.',
   'error.PERMISSION_DENIED': 'You do not have permission to perform this operation.',
   'error.FORBIDDEN': 'You do not have permission to perform this operation.',
+  'error.LAST_KEY_CANNOT_REVOKE': 'Keep at least one active User Key. Create another key before revoking this one.',
   'error.NOT_FOUND': 'The resource does not exist or has been deleted.',
   'error.ALREADY_EXISTS': 'The resource already exists. Please do not create it again.',
   'error.MEMBER_ALREADY_EXISTS': 'This user is already a team member. No need to add again.',
