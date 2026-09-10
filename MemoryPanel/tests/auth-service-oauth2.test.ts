@@ -41,6 +41,7 @@ function makeConfig(identityStorePath: string): PanelAuthConfig {
     sessionSecure: false,
     sessionSecret: SESSION_SECRET,
     identityStorePath,
+    sessionStore: 'local',
     woa: {
       enabled: false,
       appToken: '',
@@ -284,28 +285,28 @@ describe('PanelAuthService oauth2', () => {
     expect(result.kind).toBe('pending');
     if (result.kind === 'pending') {
       expect(result.pending.mode).toBe('bind_only');
-      expect(service.getOauth2PendingView(result.pending.pendingToken).mode).toBe('bind_only');
+      expect((await service.getOauth2PendingView(result.pending.pendingToken)).mode).toBe('bind_only');
     }
   });
 
-  it('consumeOauth2Pending is open→consuming then rejects second consume', () => {
+  it('consumeOauth2Pending is open→consuming then rejects second consume', async () => {
     const { service } = setup(async () => ok(null));
-    const pending = service.createOauth2Pending({
+    const pending = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity(),
       mode: 'create_or_bind',
     });
-    const first = service.consumeOauth2Pending(pending.pendingToken);
+    const first = await service.consumeOauth2Pending(pending.pendingToken);
     expect(first.status).toBe('consuming');
-    expect(() => service.consumeOauth2Pending(pending.pendingToken)).toThrow(PanelAuthError);
+    await expect(service.consumeOauth2Pending(pending.pendingToken)).rejects.toBeInstanceOf(PanelAuthError);
     try {
-      service.consumeOauth2Pending(pending.pendingToken);
+      await service.consumeOauth2Pending(pending.pendingToken);
     } catch (err) {
       expect(err).toBeInstanceOf(PanelAuthError);
       expect((err as PanelAuthError).code).toBe('pending_consumed');
     }
-    service.deleteOauth2Pending(pending.pendingToken);
-    expect(service.getOauth2Pending(pending.pendingToken)).toBeNull();
+    await service.deleteOauth2Pending(pending.pendingToken);
+    expect(await service.getOauth2Pending(pending.pendingToken)).toBeNull();
   });
 
   it('true first login yields pending create_or_bind', async () => {
@@ -380,7 +381,7 @@ describe('PanelAuthService oauth2', () => {
       throw new Error(`unexpected action ${action}`);
     });
 
-    const pending = service.createOauth2Pending({
+    const pending = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity(),
       mode: 'create_or_bind',
@@ -439,7 +440,7 @@ describe('PanelAuthService oauth2', () => {
       throw new Error(`unexpected action ${action}`);
     });
 
-    const pending = service.createOauth2Pending({
+    const pending = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity({ subject: 'alice@example.com', email: 'alice@example.com' }),
       mode: 'create_or_bind',
@@ -453,16 +454,16 @@ describe('PanelAuthService oauth2', () => {
     ).rejects.toMatchObject({ code: 'target_already_bound_other_identity', status: 409 });
   });
 
-  it('getOauth2PendingView returns pending_consumed while consuming', () => {
+  it('getOauth2PendingView returns pending_consumed while consuming', async () => {
     const { service } = setup(async () => ok(null));
-    const pending = service.createOauth2Pending({
+    const pending = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity(),
       mode: 'create_or_bind',
     });
-    service.consumeOauth2Pending(pending.pendingToken);
+    await service.consumeOauth2Pending(pending.pendingToken);
     try {
-      service.getOauth2PendingView(pending.pendingToken);
+      await service.getOauth2PendingView(pending.pendingToken);
       expect.fail('expected pending_consumed');
     } catch (err) {
       expect(err).toBeInstanceOf(PanelAuthError);

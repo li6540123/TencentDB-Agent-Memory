@@ -124,6 +124,17 @@ export interface PanelOAuth2JsonPaths {
   email: string;
 }
 
+export interface PanelAuthRedisConfig {
+  /** Full Redis URL; when set, overrides host/port/password/db. */
+  url?: string;
+  host: string;
+  port: number;
+  password: string;
+  db: number;
+  /** Key namespace; default `panel:` (isolates from Proxy prefixes). */
+  keyPrefix: string;
+}
+
 export interface PanelAuthConfig {
   userKeyEnabled: boolean;
   idpEnabled: boolean;
@@ -132,6 +143,10 @@ export interface PanelAuthConfig {
   sessionSecure: boolean;
   sessionSecret: string;
   identityStorePath: string;
+  /** `local` = in-process Maps + file identity; `redis` = all IdP state in Redis. */
+  sessionStore: 'local' | 'redis';
+  /** Present when `sessionStore === 'redis'`. */
+  redis?: PanelAuthRedisConfig;
   woa: {
     enabled: boolean;
     appToken: string;
@@ -246,6 +261,30 @@ function buildAuthConfig(): PanelAuthConfig {
     assertOAuth2Config(oauth2);
   }
 
+  const sessionStoreRaw = env('PANEL_SESSION_STORE', 'local').trim().toLowerCase();
+  if (sessionStoreRaw !== 'local' && sessionStoreRaw !== 'redis') {
+    throw new Error(`PANEL_SESSION_STORE must be "local" or "redis", got: ${sessionStoreRaw}`);
+  }
+  const sessionStore = sessionStoreRaw as 'local' | 'redis';
+  let redis: PanelAuthRedisConfig | undefined;
+  if (sessionStore === 'redis') {
+    const url = env('PANEL_REDIS_URL', '');
+    const host = env('PANEL_REDIS_HOST', '');
+    if (!url && !host) {
+      throw new Error(
+        'PANEL_SESSION_STORE=redis requires PANEL_REDIS_URL or PANEL_REDIS_HOST',
+      );
+    }
+    redis = {
+      ...(url ? { url } : {}),
+      host: host || '127.0.0.1',
+      port: envInt('PANEL_REDIS_PORT', 6379),
+      password: env('PANEL_REDIS_PASSWORD', ''),
+      db: envInt('PANEL_REDIS_DB', 0),
+      keyPrefix: env('PANEL_REDIS_KEY_PREFIX', 'panel:'),
+    };
+  }
+
   // OAuth2 APP_URL 仅在 oauth2 模式启用时参与 Secure 推断；仅 WOA 时忽略残留的 OAUTH2_APP_URL。
   const sessionSecureAppUrl = oauth2Enabled ? (oauth2AppUrl || appUrl) : appUrl;
   const sessionSecureFallback = sessionSecureAppUrl.startsWith('https://');
@@ -259,6 +298,8 @@ function buildAuthConfig(): PanelAuthConfig {
     // 仅在启用 IdP 时才需要密钥；未启用时留空，避免非 WOA 部署也生成密钥文件。
     sessionSecret: idpEnabled ? resolveSessionSecret(identityStorePath) : '',
     identityStorePath,
+    sessionStore,
+    redis,
     woa: {
       enabled: woaEnabled,
       appToken: envFirst(['PANEL_AUTH_WOA_APP_TOKEN', 'PANEL_AUTH_IDP_WOA_APP_TOKEN'], ''),

@@ -332,10 +332,10 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
     }
   });
 
-  api.get('/auth/idp/oauth2/pending', (c: Context) => {
+  api.get('/auth/idp/oauth2/pending', async (c: Context) => {
     try {
       const pending = c.req.query('pending');
-      const view = deps.auth.getOauth2PendingView(pending);
+      const view = await deps.auth.getOauth2PendingView(pending);
       return c.json(view);
     } catch (err) {
       return handleAuthError(c, err);

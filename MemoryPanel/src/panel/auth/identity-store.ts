@@ -12,6 +12,13 @@ export interface IdentityBinding {
   updatedAt: string;
 }
 
+/** Async identity binding cache (file or Redis). */
+export interface IdentityStore {
+  find(instanceId: string, providerId: string, externalSubject: string): Promise<IdentityBinding | null>;
+  save(binding: IdentityBinding): Promise<void>;
+  remove(instanceId: string, providerId: string, externalSubject: string): Promise<void>;
+}
+
 interface IdentityFile {
   version: 1;
   bindings: IdentityBinding[];
@@ -40,24 +47,24 @@ export function decryptSecret(value: string, secret: string): string {
   ]).toString('utf8');
 }
 
-export class FileIdentityStore {
+export class FileIdentityStore implements IdentityStore {
   private readonly bindings = new Map<string, IdentityBinding>();
 
   constructor(private readonly filePath: string) {
     this.load();
   }
 
-  find(instanceId: string, providerId: string, externalSubject: string): IdentityBinding | null {
+  async find(instanceId: string, providerId: string, externalSubject: string): Promise<IdentityBinding | null> {
     return this.bindings.get(this.key(instanceId, providerId, externalSubject)) ?? null;
   }
 
-  save(binding: IdentityBinding): void {
+  async save(binding: IdentityBinding): Promise<void> {
     this.bindings.set(this.key(binding.instanceId, binding.providerId, binding.externalSubject), binding);
     this.flush();
   }
 
   /** 删除本地 binding 缓存（OAuth2 坏 key 后清掉陈旧条目，避免卡在 WOA resolveIdentity）。 */
-  remove(instanceId: string, providerId: string, externalSubject: string): void {
+  async remove(instanceId: string, providerId: string, externalSubject: string): Promise<void> {
     const k = this.key(instanceId, providerId, externalSubject);
     if (!this.bindings.has(k)) return;
     this.bindings.delete(k);

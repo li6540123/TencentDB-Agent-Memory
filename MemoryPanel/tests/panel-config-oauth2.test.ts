@@ -9,6 +9,8 @@ function clearPanelAuthEnv(): void {
   for (const key of Object.keys(process.env)) {
     if (
       key.startsWith('PANEL_AUTH_')
+      || key.startsWith('PANEL_REDIS_')
+      || key === 'PANEL_SESSION_STORE'
       || key === 'METADATA_EXTERNAL_AUTH_PROVIDER'
     ) {
       delete process.env[key];
@@ -96,5 +98,45 @@ describe('panel-config oauth2', () => {
     const auth = await loadAuthConfig();
 
     expect(auth.sessionSecure).toBe(true);
+  });
+
+  it('defaults sessionStore to local', async () => {
+    clearPanelAuthEnv();
+    tempDir = mkdtempSync(join(tmpdir(), 'panel-auth-oauth2-'));
+    process.env.PANEL_AUTH_MODE = 'user_key';
+    process.env.PANEL_AUTH_IDENTITY_STORE_PATH = join(tempDir, 'identities.json');
+
+    const auth = await loadAuthConfig();
+    expect(auth.sessionStore).toBe('local');
+    expect(auth.redis).toBeUndefined();
+  });
+
+  it('requires redis connection when PANEL_SESSION_STORE=redis', async () => {
+    clearPanelAuthEnv();
+    process.env.PANEL_AUTH_MODE = 'user_key';
+    process.env.PANEL_SESSION_STORE = 'redis';
+
+    await expect(loadAuthConfig()).rejects.toThrow(/PANEL_REDIS_URL|PANEL_REDIS_HOST/);
+  });
+
+  it('loads redis session store config from env', async () => {
+    clearPanelAuthEnv();
+    tempDir = mkdtempSync(join(tmpdir(), 'panel-auth-oauth2-'));
+    process.env.PANEL_AUTH_MODE = 'user_key';
+    process.env.PANEL_AUTH_IDENTITY_STORE_PATH = join(tempDir, 'identities.json');
+    process.env.PANEL_SESSION_STORE = 'redis';
+    process.env.PANEL_REDIS_HOST = 'redis';
+    process.env.PANEL_REDIS_PASSWORD = 'secret';
+    process.env.PANEL_REDIS_KEY_PREFIX = 'panel:';
+
+    const auth = await loadAuthConfig();
+    expect(auth.sessionStore).toBe('redis');
+    expect(auth.redis).toMatchObject({
+      host: 'redis',
+      port: 6379,
+      password: 'secret',
+      db: 0,
+      keyPrefix: 'panel:',
+    });
   });
 });

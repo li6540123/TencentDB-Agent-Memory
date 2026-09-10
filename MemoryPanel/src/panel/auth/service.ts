@@ -4,12 +4,28 @@ import type { PanelAuthConfig } from '../config/panel-config.js';
 import { InstanceRegistry } from '../config/instance-registry.js';
 import type { MetaKernelPort } from '../kernel/ports/meta-kernel-port.js';
 import type { MetaCallContext } from '../kernel/types.js';
-import { FileIdentityStore, decryptSecret, encryptSecret } from './identity-store.js';
-import { MemorySessionStore, type IdpSession, type SessionUser } from './session-store.js';
+import { buildAuthStores } from './build-auth-stores.js';
+import { decryptSecret, encryptSecret, type IdentityStore } from './identity-store.js';
+import {
+  OAUTH2_EPHEMERAL_TTL_MS,
+  type Oauth2EphemeralStore,
+  type Oauth2PendingMode,
+  type Oauth2PendingState,
+  type Oauth2PendingStatus,
+  type Oauth2PendingView,
+} from './oauth2-ephemeral-store.js';
+import type { IdpSession, SessionStore, SessionUser } from './session-store.js';
 import { AuthProviderRegistry } from './provider-registry.js';
 import { Oauth2Provider } from './oauth2-provider.js';
 import { WoaProvider } from './woa-provider.js';
 import type { ExternalIdentity, HeaderInjectedProvider, RedirectOAuth2Provider } from './types.js';
+
+export type {
+  Oauth2PendingMode,
+  Oauth2PendingState,
+  Oauth2PendingStatus,
+  Oauth2PendingView,
+};
 
 export class PanelAuthError extends Error {
   constructor(readonly code: string, message: string, readonly status = 401) {
@@ -41,40 +57,6 @@ export interface PendingWoaLogin {
   expiresAt: number;
 }
 
-/** OAuth2 确认页 pending：真·首次 vs 仅缺有效 key。 */
-export type Oauth2PendingMode = 'create_or_bind' | 'bind_only';
-
-export type Oauth2PendingStatus = 'open' | 'consuming';
-
-/**
- * OAuth2 首次/绑 key 确认态（内存 Map；Redis 见 Task 8）。
- * TTL 300s；消费顺序：open → consuming → 成功后删除（禁止先删再 create）。
- */
-export interface Oauth2PendingState {
-  pendingToken: string;
-  instanceId: string;
-  providerId: string;
-  externalSubject: string;
-  identity: ExternalIdentity;
-  returnTo: string;
-  createdAt: number;
-  expiresAt: number;
-  status: Oauth2PendingStatus;
-  mode: Oauth2PendingMode;
-  /** preview 通过后写入 sha256(userKey)，confirm 再校验。 */
-  verifiedUserKeyHash?: string;
-}
-
-/** GET .../oauth2/pending 对外视图（不含 sk-mem / token 明文）。 */
-export interface Oauth2PendingView {
-  instance_id: string;
-  display_name?: string;
-  login_name: string;
-  email?: string;
-  mode: Oauth2PendingMode;
-  expires_at: number;
-}
-
 export type ResolveOauth2LoginResult =
   | {
       kind: 'authenticated';
@@ -86,17 +68,8 @@ export type ResolveOauth2LoginResult =
       pending: Oauth2PendingState;
     };
 
-const OAUTH2_PENDING_TTL_MS = 5 * 60 * 1000;
-const OAUTH2_STATE_TTL_MS = 5 * 60 * 1000;
-
-/** OAuth2 authorize `state`（一次性；callback 校验后立即删除）。 */
-interface Oauth2LoginState {
-  state: string;
-  instanceId: string;
-  returnTo: string;
-  codeVerifier?: string;
-  expiresAt: number;
-}
+const OAUTH2_PENDING_TTL_MS = OAUTH2_EPHEMERAL_TTL_MS;
+const OAUTH2_STATE_TTL_MS = OAUTH2_EPHEMERAL_TTL_MS;
 
 /**
  * 用户自填 user_key 的格式约束。
@@ -165,14 +138,11 @@ export class PanelAuthService {
   private readonly instances: InstanceRegistry;
   private readonly metaKernel: MetaKernelPort;
   private readonly logger: Logger;
-  private readonly sessions: MemorySessionStore;
-  private readonly identities: FileIdentityStore;
+  private readonly sessions: SessionStore;
+  private readonly identities: IdentityStore;
+  private readonly ephemeral: Oauth2EphemeralStore;
   private readonly providers = new AuthProviderRegistry();
   private readonly consumedPendingWoa = new Set<string>();
-  /** OAuth2 pending：token → state；过期靠 get/consume 时惰性清理。 */
-  private readonly oauth2Pending = new Map<string, Oauth2PendingState>();
-  /** OAuth2 authorize state → instance/returnTo/PKCE；callback 一次性消费。 */
-  private readonly oauth2LoginStates = new Map<string, Oauth2LoginState>();
 
   constructor(dependencies: PanelAuthDependencies) {
     const { config, instances, metaKernel, logger } = dependencies;
@@ -188,8 +158,10 @@ export class PanelAuthService {
     if (config.idpEnabled && !config.sessionSecret) {
       throw new Error('session secret is unavailable: internal generation or persistence failed');
     }
-    this.sessions = new MemorySessionStore(config.sessionTtlSeconds);
-    this.identities = new FileIdentityStore(config.identityStorePath);
+    const stores = buildAuthStores(config, config.sessionSecret);
+    this.sessions = stores.sessions;
+    this.identities = stores.identities;
+    this.ephemeral = stores.ephemeral;
     // Provider 统一走 registry：删除历史上的私有 `this.woa` 字段。
     // 接第二个 Provider（OAuth2）时在这里 register，不在 Service 上再增加同名字段。
     if (config.idpEnabled && config.woa.enabled) {
@@ -574,7 +546,7 @@ export class PanelAuthService {
     const context = this.context(entry, userKey, requestId);
     const verified = await this.metaKernel.invoke('auth/verify', { user_key: userKey }, context);
     const user = this.readVerifiedUser(verified);
-    this.saveIdentityBinding(instanceId, identity, user.user_id, userKey);
+    await this.saveIdentityBinding(instanceId, identity, user.user_id, userKey);
     return { coreUserId: user.user_id, identity };
   }
 
@@ -596,7 +568,7 @@ export class PanelAuthService {
     identity: ExternalIdentity,
     requestId?: string,
   ): Promise<{ coreUserId: string; userKey: string; user: SessionUser }> {
-    const existing = this.identities.find(instanceId, identity.providerId, identity.subject);
+    const existing = await this.identities.find(instanceId, identity.providerId, identity.subject);
     if (existing) {
       let userKey: string;
       try {
@@ -682,7 +654,7 @@ export class PanelAuthService {
     // 回写本地绑定缓存：下次登录直接命中本地路径，无需再打 Core。
     // 回写失败（卷只读 / 磁盘满）不阻断本次登录——下次仍可经 Core 反查兜底。
     try {
-      this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
+      await this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
     } catch (err) {
       this.logger.warn('WOA identity binding cache write failed (non-fatal)', {
         instanceId, coreUserId, err: err instanceof Error ? err.message : String(err),
@@ -792,7 +764,7 @@ export class PanelAuthService {
     // 幂等兜底：并发/重复提交时可能在前一次建号写盘前再次进入，
     // 此前靠"user_id = 登录名"的唯一约束挡住重复建号；改为内核生成 usr-xxx 后
     // 该约束消失，必须在建号前显式检查绑定是否已经存在。
-    const alreadyBound = this.identities.find(instanceId, identity.providerId, identity.subject);
+    const alreadyBound = await this.identities.find(instanceId, identity.providerId, identity.subject);
     if (alreadyBound) {
       // OAuth2：陈旧 binding（坏 key）可能与 create_or_bind pending 并存。
       // 禁止走 WOA resolveIdentity（坏 key → 永久 401）；验活失败则清缓存后继续建号。
@@ -812,7 +784,7 @@ export class PanelAuthService {
             err: err instanceof Error ? err.message : String(err),
           });
           try {
-            this.identities.remove(instanceId, identity.providerId, identity.subject);
+            await this.identities.remove(instanceId, identity.providerId, identity.subject);
           } catch (removeErr) {
             this.logger.warn('OAuth2 stale binding remove failed (non-fatal)', {
               instanceId,
@@ -915,7 +887,7 @@ export class PanelAuthService {
         throw new PanelAuthError('WOA_TEAM_PROVISION_FAILED', added.message || 'failed to add WOA user to team', 502);
       }
     }
-    this.identities.save({
+    await this.identities.save({
       instanceId,
       providerId: identity.providerId,
       externalSubject: identity.subject,
@@ -934,10 +906,10 @@ export class PanelAuthService {
     return { coreUserId: result.user_id, userKey: result.default_user_key, user: verified.user };
   }
 
-  private saveIdentityBinding(
+  private async saveIdentityBinding(
     ...[instanceId, identity, coreUserId, userKey]: [string, ExternalIdentity, string, string]
-  ): void {
-    this.identities.save({
+  ): Promise<void> {
+    await this.identities.save({
       instanceId,
       providerId: identity.providerId,
       externalSubject: identity.subject,
@@ -972,7 +944,7 @@ export class PanelAuthService {
       state,
       redirectUri: this.config.oauth2.redirectUri,
     });
-    this.oauth2LoginStates.set(state, {
+    await this.ephemeral.putLoginState({
       state,
       instanceId,
       returnTo: this.safeReturnTo(returnTo),
@@ -999,10 +971,8 @@ export class PanelAuthService {
       throw new PanelAuthError('invalid_code', 'OAuth2 authorization code is missing', 400);
     }
 
-    const loginState = this.oauth2LoginStates.get(input.state);
-    // 无论是否过期，命中即删除，防 code/state 重放。
-    if (loginState) this.oauth2LoginStates.delete(input.state);
-    if (!loginState || loginState.expiresAt <= Date.now()) {
+    const loginState = await this.ephemeral.takeLoginState(input.state);
+    if (!loginState) {
       throw new PanelAuthError('invalid_state', 'OAuth2 state is invalid or expired', 400);
     }
 
@@ -1091,7 +1061,7 @@ export class PanelAuthService {
     };
 
     // ① 本地 binding 命中
-    const existing = this.identities.find(instanceId, identity.providerId, identity.subject);
+    const existing = await this.identities.find(instanceId, identity.providerId, identity.subject);
     if (existing) {
       let userKey: string | undefined;
       try {
@@ -1122,7 +1092,7 @@ export class PanelAuthService {
       return tryAuthenticate(recovered.coreUserId, recovered.userKey, recovered.user);
     }
     if (recovered?.kind === 'bind_only') {
-      const pending = this.createOauth2Pending({
+      const pending = await this.createOauth2Pending({
         instanceId,
         identity,
         returnTo,
@@ -1132,7 +1102,7 @@ export class PanelAuthService {
     }
 
     // ③ 真·首次
-    const pending = this.createOauth2Pending({
+    const pending = await this.createOauth2Pending({
       instanceId,
       identity,
       returnTo,
@@ -1179,7 +1149,7 @@ export class PanelAuthService {
     }
     const verified = await this.verifyCoreUser(instanceId, userKey, requestId);
     try {
-      this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
+      await this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
     } catch (err) {
       this.logger.warn('OAuth2 identity binding cache write failed (non-fatal)', {
         instanceId, coreUserId, err: err instanceof Error ? err.message : String(err),
@@ -1218,12 +1188,12 @@ export class PanelAuthService {
     }
   }
 
-  createOauth2Pending(input: {
+  async createOauth2Pending(input: {
     instanceId: string;
     identity: ExternalIdentity;
     returnTo?: string;
     mode: Oauth2PendingMode;
-  }): Oauth2PendingState {
+  }): Promise<Oauth2PendingState> {
     this.requireOauth2();
     this.requireInstance(input.instanceId);
     const now = Date.now();
@@ -1240,30 +1210,23 @@ export class PanelAuthService {
       status: 'open',
       mode: input.mode,
     };
-    this.oauth2Pending.set(pendingToken, state);
+    await this.ephemeral.putPending(state);
     return state;
   }
 
-  getOauth2Pending(token: string | undefined): Oauth2PendingState | null {
+  async getOauth2Pending(token: string | undefined): Promise<Oauth2PendingState | null> {
     if (!this.providers.get('oauth2')) return null;
     if (!token) return null;
-    const state = this.oauth2Pending.get(token);
-    if (!state) return null;
-    if (state.expiresAt <= Date.now()) {
-      this.oauth2Pending.delete(token);
-      return null;
-    }
-    return state;
+    return this.ephemeral.getPending(token);
   }
 
   /** GET pending 展示视图。无效/过期 → pending_expired；占坑中 → pending_consumed。 */
-  getOauth2PendingView(token: string | undefined): Oauth2PendingView {
+  async getOauth2PendingView(token: string | undefined): Promise<Oauth2PendingView> {
     if (!token) {
       throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
     }
-    const state = this.oauth2Pending.get(token);
-    if (!state || state.expiresAt <= Date.now()) {
-      if (state) this.oauth2Pending.delete(token);
+    const state = await this.ephemeral.getPending(token);
+    if (!state) {
       throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
     }
     if (state.status === 'consuming') {
@@ -1283,26 +1246,26 @@ export class PanelAuthService {
    * 原子占坑：open → consuming。第二次 → pending_consumed；过期 → pending_expired。
    * 成功路径由调用方在建号/绑号完成后 `deleteOauth2Pending`。
    */
-  consumeOauth2Pending(token: string): Oauth2PendingState {
-    const pending = this.getOauth2Pending(token);
-    if (!pending) {
+  async consumeOauth2Pending(token: string): Promise<Oauth2PendingState> {
+    const result = await this.ephemeral.consumePending(token);
+    if (result.kind === 'expired') {
       throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
     }
-    if (pending.status === 'consuming') {
+    if (result.kind === 'consumed') {
       throw new PanelAuthError('pending_consumed', 'OAuth2 login confirmation already in progress', 409);
     }
-    pending.status = 'consuming';
-    return pending;
+    return result.pending;
   }
 
-  deleteOauth2Pending(token: string): void {
-    this.oauth2Pending.delete(token);
+  async deleteOauth2Pending(token: string): Promise<void> {
+    await this.ephemeral.deletePending(token);
   }
 
   /** preview 续期 TTL 并写入 verifiedUserKeyHash（不占坑、不删除）。 */
-  private touchOauth2Pending(pending: Oauth2PendingState, verifiedUserKeyHash?: string): void {
+  private async touchOauth2Pending(pending: Oauth2PendingState, verifiedUserKeyHash?: string): Promise<void> {
     pending.expiresAt = Date.now() + OAUTH2_PENDING_TTL_MS;
     if (verifiedUserKeyHash) pending.verifiedUserKeyHash = verifiedUserKeyHash;
+    await this.ephemeral.putPending(pending);
   }
 
   /**
@@ -1361,7 +1324,7 @@ export class PanelAuthService {
     userKeyDisplay: string;
     redirectUrl: string;
   }> {
-    const pending = this.consumeOauth2Pending(input.pendingToken);
+    const pending = await this.consumeOauth2Pending(input.pendingToken);
     try {
       if (pending.mode === 'bind_only') {
         throw new PanelAuthError(
@@ -1390,7 +1353,7 @@ export class PanelAuthService {
         displayName: pending.identity.displayName ?? pending.identity.loginName,
         user: resolved.user,
       });
-      this.deleteOauth2Pending(input.pendingToken);
+      await this.deleteOauth2Pending(input.pendingToken);
       return {
         session,
         identity: pending.identity,
@@ -1399,7 +1362,7 @@ export class PanelAuthService {
       };
     } catch (err) {
       // MVP：无论 create 成败，消费后删除 pending，防重放再建号。
-      this.deleteOauth2Pending(input.pendingToken);
+      await this.deleteOauth2Pending(input.pendingToken);
       throw err;
     }
   }
@@ -1410,7 +1373,7 @@ export class PanelAuthService {
     userKey: string;
     requestId?: string;
   }): Promise<{ userId: string; username?: string; email?: string }> {
-    const pending = this.getOauth2Pending(input.pendingToken);
+    const pending = await this.getOauth2Pending(input.pendingToken);
     if (!pending || pending.status !== 'open') {
       throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
     }
@@ -1432,7 +1395,7 @@ export class PanelAuthService {
       targetUserId: user_id,
       requestId: input.requestId,
     });
-    this.touchOauth2Pending(pending, this.hashUserKey(key));
+    await this.touchOauth2Pending(pending, this.hashUserKey(key));
     return {
       userId: user_id,
       username: user.username,
@@ -1450,7 +1413,7 @@ export class PanelAuthService {
     identity: ExternalIdentity;
     redirectUrl: string;
   }> {
-    const peek = this.getOauth2Pending(input.pendingToken);
+    const peek = await this.getOauth2Pending(input.pendingToken);
     if (!peek || peek.status !== 'open') {
       throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
     }
@@ -1462,7 +1425,7 @@ export class PanelAuthService {
       throw new PanelAuthError('invalid_key', 'user_key does not match preview', 400);
     }
 
-    const pending = this.consumeOauth2Pending(input.pendingToken);
+    const pending = await this.consumeOauth2Pending(input.pendingToken);
     try {
       const entry = this.requireInstance(pending.instanceId);
       const verified = await this.metaKernel.invoke(
@@ -1483,7 +1446,7 @@ export class PanelAuthService {
       });
       const adminCtx = this.context(entry, entry.api_key, input.requestId);
       await this.bindExternalAuth(user_id, pending.identity, adminCtx);
-      this.saveIdentityBinding(pending.instanceId, pending.identity, user_id, key);
+      await this.saveIdentityBinding(pending.instanceId, pending.identity, user_id, key);
       await this.syncOauth2Profile(pending.instanceId, user_id, pending.identity, input.requestId);
       const session = await this.sessions.create({
         instanceId: pending.instanceId,
@@ -1494,10 +1457,10 @@ export class PanelAuthService {
         displayName: pending.identity.displayName ?? pending.identity.loginName,
         user,
       });
-      this.deleteOauth2Pending(input.pendingToken);
+      await this.deleteOauth2Pending(input.pendingToken);
       return { session, identity: pending.identity, redirectUrl: '/' };
     } catch (err) {
-      this.deleteOauth2Pending(input.pendingToken);
+      await this.deleteOauth2Pending(input.pendingToken);
       throw err;
     }
   }

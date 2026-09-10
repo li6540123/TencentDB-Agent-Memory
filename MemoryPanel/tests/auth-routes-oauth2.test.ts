@@ -29,6 +29,7 @@ function makeConfig(identityStorePath: string): PanelAuthConfig {
     sessionSecure: false,
     sessionSecret: SESSION_SECRET,
     identityStorePath,
+    sessionStore: 'local',
     woa: {
       enabled: false,
       appToken: '',
@@ -325,7 +326,7 @@ describe('oauth2 auth routes', () => {
     expect(missing.status).toBe(400);
     expect((await missing.json()).message).toBe('pending_expired');
 
-    const created = service.createOauth2Pending({
+    const created = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity(),
       mode: 'create_or_bind',
@@ -339,14 +340,14 @@ describe('oauth2 auth routes', () => {
   });
 
   it('concurrent consume returns pending_consumed on second confirm-create', async () => {
-    const pending = service.createOauth2Pending({
+    const pending = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity(),
       mode: 'create_or_bind',
     });
 
     // 先占坑
-    service.consumeOauth2Pending(pending.pendingToken);
+    await service.consumeOauth2Pending(pending.pendingToken);
 
     const second = await app.request('/auth/idp/oauth2/confirm-create', {
       method: 'POST',
@@ -358,7 +359,7 @@ describe('oauth2 auth routes', () => {
   });
 
   it('confirm-create success sets SameSite=Lax session cookie', async () => {
-    const pending = service.createOauth2Pending({
+    const pending = await service.createOauth2Pending({
       instanceId: 'inst-1',
       identity: makeIdentity(),
       mode: 'create_or_bind',
