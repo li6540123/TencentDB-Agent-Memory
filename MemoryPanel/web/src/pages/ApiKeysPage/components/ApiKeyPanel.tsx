@@ -12,10 +12,10 @@
  * 「用户只能看到 / 管理自己的 key」。
  *
  * 安全设计（内核既有行为，不是本组件的取舍）：
- *   - key 明文只在 `create` 响应里出现这一次，之后 list/get 都不会再回传；
+ *   - list/get 仍不回传明文；完整 sk-mem 仅经主人 `user-key/reveal` 按需取得；
  *   - `key_prefix` 是内核给的可展示前缀（如 `sk-mem-ab12****`），用于免密识别
  *     具体是哪把 key，不等同于明文；
- *   - 因此列表里已存在的 key 无法「展开显示完整 key」，只能吊销。
+ *   - Key Prefix 旁复制图标：reveal → 剪贴板，格子里仍只显示 prefix。
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -36,9 +36,10 @@ import {
   Modal,
   Input,
 } from 'tea-component';
-import { AddIcon } from 'tea-icons-react';
+import { AddIcon, FileCopyIcon } from 'tea-icons-react';
 import { userKeysApi, metaInstancesApi, type UserKey } from '@/lib/teamApi';
 import { formatMaasCacheTtlHint, getMaasCacheTtlMs } from '@/lib/maas-cache-ttl';
+import { copyToClipboard } from '@/pages/ChatMemoryPage/utils/memory-utils';
 import { useCurrentRole } from '@/services/useCurrentRole';
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
@@ -109,8 +110,41 @@ export default function ApiKeyPanel() {
   const [maasModalKey, setMaasModalKey] = useState<UserKey | null>(null);
   const [maasInput, setMaasInput] = useState('');
   const [maasSaving, setMaasSaving] = useState(false);
+  /** 正在 reveal 的 key_id，防连点 */
+  const [revealingId, setRevealingId] = useState<string | null>(null);
 
   const effectiveHint = formatMaasCacheTtlHint(getMaasCacheTtlMs(), t);
+
+  function isKeyExpired(key: UserKey): boolean {
+    if (!key.expires_at) return false;
+    const ms = new Date(key.expires_at).getTime();
+    return !Number.isNaN(ms) && ms <= Date.now();
+  }
+
+  /** 仅主人可复制；admin 看别人列表时隐藏。过期/吊销禁用（依赖 API 兜底）。 */
+  function canRevealCopy(key: UserKey): boolean {
+    if (key.revoked_at) return false;
+    if (key.user_id && auth?.user_id && key.user_id !== auth.user_id) return false;
+    return true;
+  }
+
+  async function handleRevealCopy(key: UserKey) {
+    if (revealingId) return;
+    setRevealingId(key.key_id);
+    try {
+      const { key_value } = await userKeysApi.reveal(key.key_id);
+      const ok = await copyToClipboard(key_value);
+      if (ok) {
+        tea.notify.success(t('apiKey.copy.success'));
+      } else {
+        tea.notify.error(t('apiKey.copy.failed'));
+      }
+    } catch (e) {
+      tea.notify.error(e);
+    } finally {
+      setRevealingId(null);
+    }
+  }
 
   async function handleCreate() {
     setCreating(true);
@@ -271,11 +305,35 @@ export default function ApiKeyPanel() {
             {
               key: 'key_prefix',
               header: t('apiKey.table.keyPrefix'),
-              render: (key) => (
-                <Text parent="code" style={{ fontSize: 12 }}>
-                  {key.key_prefix || '—'}
-                </Text>
-              ),
+              render: (key) => {
+                const showCopy = canRevealCopy(key);
+                const expired = isKeyExpired(key);
+                return (
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 2,
+                      fontSize: 12,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <Text parent="code" style={{ fontSize: 12 }}>
+                      {key.key_prefix || '—'}
+                    </Text>
+                    {showCopy ? (
+                      <Button
+                        type="icon"
+                        tooltip={t('apiKey.copy.tooltip')}
+                        disabled={expired || revealingId === key.key_id}
+                        onClick={() => void handleRevealCopy(key)}
+                      >
+                        <FileCopyIcon size={14} />
+                      </Button>
+                    ) : null}
+                  </span>
+                );
+              },
             },
             {
               key: 'maas_key',

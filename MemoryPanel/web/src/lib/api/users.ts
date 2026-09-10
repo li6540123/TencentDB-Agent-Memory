@@ -87,6 +87,13 @@ export const userKeysApi = {
   /** 吊销一把 Key */
   revoke: (keyId: string) => metaPost<{ ok: boolean }>('user-key/revoke', { key_id: keyId }),
 
+  /**
+   * 主人揭晓一把 Key 的完整明文（仅 owner；admin 也不能代 reveal）。
+   * 走与 list 相同的 panelMeta，IdP Cookie 会话下同样可用。
+   */
+  reveal: (keyId: string) =>
+    metaPost<{ key_id: string; key_value: string }>('user-key/reveal', { key_id: keyId }),
+
   /** 设置 / 清除该 sk-mem 绑定的 MaaS API Key（空串 = 清除） */
   setMaasKey: (data: { key_id: string; maas_api_key: string }) =>
     metaPost<{ ok: true }>('user-key/maas-key/set', data),
