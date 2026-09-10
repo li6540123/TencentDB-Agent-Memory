@@ -56,6 +56,14 @@ export class FileIdentityStore {
     this.flush();
   }
 
+  /** 删除本地 binding 缓存（OAuth2 坏 key 后清掉陈旧条目，避免卡在 WOA resolveIdentity）。 */
+  remove(instanceId: string, providerId: string, externalSubject: string): void {
+    const k = this.key(instanceId, providerId, externalSubject);
+    if (!this.bindings.has(k)) return;
+    this.bindings.delete(k);
+    this.flush();
+  }
+
   private key(instanceId: string, providerId: string, externalSubject: string): string {
     return `${instanceId}\u0000${providerId}\u0000${externalSubject}`;
   }

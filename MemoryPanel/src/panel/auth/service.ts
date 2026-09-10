@@ -739,12 +739,33 @@ export class PanelAuthService {
     // auth_provider / display_name 一并落库，与建号路径保持同一个外部域，
     // 避免"绑定写 A 域、鉴权按 B 域查"导致的 401；展示名让成员列表显示中文名
     // 而非登录名（core 侧仅在目标账号 display_name 为空时补写，不覆盖）。
-    await this.metaKernel.invoke('user/bind-external', {
+    const bound = await this.metaKernel.invoke('user/bind-external', {
       user_id: coreUserId,
       external_id: externalAuthId,
       auth_provider: this.authProviderDomainOf(identity),
       display_name: identity.displayName?.trim() || undefined,
     }, context);
+    if (bound?.code !== 0) {
+      const raw = `${bound?.message || ''}`;
+      if (
+        raw.includes('target_already_bound_other_identity')
+        || (bound?.code === 409 && raw.includes('another external_id'))
+      ) {
+        throw new PanelAuthError(
+          'target_already_bound_other_identity',
+          'target account is already bound to another external identity',
+          409,
+        );
+      }
+      if (raw.includes('external_id_already_bound') || raw.includes('already bound to another user')) {
+        throw new PanelAuthError(
+          'identity_already_bound',
+          'this company identity is already bound to another user',
+          409,
+        );
+      }
+      throw new PanelAuthError('bind_failed', raw || 'failed to bind external identity', 502);
+    }
   }
 
   private async provisionIdentity(input: {
@@ -760,7 +781,37 @@ export class PanelAuthService {
     // 此前靠"user_id = 登录名"的唯一约束挡住重复建号；改为内核生成 usr-xxx 后
     // 该约束消失，必须在建号前显式检查绑定是否已经存在。
     const alreadyBound = this.identities.find(instanceId, identity.providerId, identity.subject);
-    if (alreadyBound) return this.resolveIdentity(instanceId, identity, requestId);
+    if (alreadyBound) {
+      // OAuth2：陈旧 binding（坏 key）可能与 create_or_bind pending 并存。
+      // 禁止走 WOA resolveIdentity（坏 key → 永久 401）；验活失败则清缓存后继续建号。
+      if (identity.providerId === 'oauth2') {
+        try {
+          const userKey = decryptSecret(alreadyBound.encryptedUserKey, this.config.sessionSecret);
+          const verified = await this.verifyCoreUser(instanceId, userKey, requestId);
+          return {
+            coreUserId: alreadyBound.coreUserId,
+            userKey,
+            user: verified.user,
+          };
+        } catch (err) {
+          this.logger.warn('OAuth2 stale binding during provision; clearing and continuing create', {
+            instanceId,
+            subject: identity.subject,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          try {
+            this.identities.remove(instanceId, identity.providerId, identity.subject);
+          } catch (removeErr) {
+            this.logger.warn('OAuth2 stale binding remove failed (non-fatal)', {
+              instanceId,
+              err: removeErr instanceof Error ? removeErr.message : String(removeErr),
+            });
+          }
+        }
+      } else {
+        return this.resolveIdentity(instanceId, identity, requestId);
+      }
+    }
     // WOA 建号：username 默认取 WOA 登录名（可在确认页修改），与 user_id 解耦。
     // OAuth2：非法字符换成 `_`（公司 nickname / email local-part 可能含点号等）。
     // user_id **不**使用登录名，交给内核按 admin「新建并绑定账号」同一套逻辑生成 usr-xxx，
@@ -1124,19 +1175,26 @@ export class PanelAuthService {
     return state;
   }
 
-  /** GET pending 展示视图。无效/过期 → PanelAuthError pending_expired。 */
+  /** GET pending 展示视图。无效/过期 → pending_expired；占坑中 → pending_consumed。 */
   getOauth2PendingView(token: string | undefined): Oauth2PendingView {
-    const pending = this.getOauth2Pending(token);
-    if (!pending || pending.status !== 'open') {
+    if (!token) {
       throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
     }
+    const state = this.oauth2Pending.get(token);
+    if (!state || state.expiresAt <= Date.now()) {
+      if (state) this.oauth2Pending.delete(token);
+      throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
+    }
+    if (state.status === 'consuming') {
+      throw new PanelAuthError('pending_consumed', 'OAuth2 login confirmation already in progress', 409);
+    }
     return {
-      instance_id: pending.instanceId,
-      display_name: pending.identity.displayName,
-      login_name: pending.identity.loginName,
-      email: pending.identity.email,
-      mode: pending.mode,
-      expires_at: pending.expiresAt,
+      instance_id: state.instanceId,
+      display_name: state.identity.displayName,
+      login_name: state.identity.loginName,
+      email: state.identity.email,
+      mode: state.mode,
+      expires_at: state.expiresAt,
     };
   }
 

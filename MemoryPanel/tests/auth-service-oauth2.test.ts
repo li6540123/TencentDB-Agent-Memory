@@ -324,4 +324,149 @@ describe('PanelAuthService oauth2', () => {
       expect(result.pending.mode).toBe('create_or_bind');
     }
   });
+
+  it('confirmOauth2Create clears stale binding instead of WOA hard 401', async () => {
+    const { service } = setup(async (action, body) => {
+      if (action === 'auth/verify') {
+        const key = String(body.user_key ?? '');
+        if (key === 'sk-mem-revoked-stale-key') {
+          return { code: 0, message: 'ok', request_id: 'r', data: { valid: false } };
+        }
+        if (key === 'sk-mem-brand-new-created') {
+          return ok({
+            valid: true,
+            user: { user_id: 'usr-new', username: 'alice', display_name: 'Alice', user_type: 'human' },
+          });
+        }
+        return { code: 0, message: 'ok', request_id: 'r', data: { valid: false } };
+      }
+      if (action === 'user/find-by-external') return ok(null);
+      if (action === 'user/create') {
+        return ok({ user_id: 'usr-new', default_user_key: 'sk-mem-brand-new-created' });
+      }
+      if (action === 'user/bind-external') return ok({ user_id: 'usr-new' });
+      if (action === 'user/update') return ok({ user_id: 'usr-new' });
+      throw new Error(`unexpected action ${action}`);
+    }, { seedKey: 'sk-mem-revoked-stale-key' });
+
+    // Stale binding + Core miss → create_or_bind pending (binding file still present).
+    const resolved = await service.resolveOauth2Login({
+      instanceId: 'inst-1',
+      identity: makeIdentity(),
+    });
+    expect(resolved.kind).toBe('pending');
+    if (resolved.kind !== 'pending') return;
+
+    const created = await service.confirmOauth2Create({
+      pendingToken: resolved.pending.pendingToken,
+    });
+    expect(created.userKeyDisplay).toBe('sk-mem-brand-new-created');
+    expect(created.session.coreUserId).toBe('usr-new');
+  });
+
+  it('previewOauth2Bind rejects identity_already_bound', async () => {
+    const { service } = setup(async (action, body) => {
+      if (action === 'auth/verify') {
+        return ok({
+          valid: true,
+          user: { user_id: 'usr-target', username: 'bob', user_type: 'human' },
+        });
+      }
+      if (action === 'user/find-by-external') {
+        // IAM identity already on another account
+        if (body.auth_provider === 'iam') return ok({ user_id: 'usr-other' });
+        return ok(null);
+      }
+      throw new Error(`unexpected action ${action}`);
+    });
+
+    const pending = service.createOauth2Pending({
+      instanceId: 'inst-1',
+      identity: makeIdentity(),
+      mode: 'create_or_bind',
+    });
+
+    await expect(
+      service.previewOauth2Bind({
+        pendingToken: pending.pendingToken,
+        userKey: 'sk-mem-existing-key',
+      }),
+    ).rejects.toMatchObject({ code: 'identity_already_bound', status: 409 });
+  });
+
+  it('previewOauth2Bind rejects target_already_bound_other_identity using Core admin public shape', async () => {
+    // Use real Core toPublicUser so this fails if admin visibility regresses
+    // (no invented external_id on a hand-rolled public user).
+    const { toPublicUser } = await import(
+      '../../MemoryCore/src/metadata/service/user-visibility.js'
+    );
+
+    const targetEntity = {
+      user_id: 'usr-target',
+      user_type: 'normal' as const,
+      username: 'bob',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      status: 'active' as const,
+      auth_provider: 'iam',
+      external_id: 'other-person@example.com',
+      display_name: 'Bob',
+      email: 'bob@example.com',
+      password: null,
+      raw_profile_json: '{}',
+      metadata_json: '{}',
+    };
+    const adminPublic = toPublicUser(targetEntity, {
+      token: 'sk-admin',
+      userId: 'usr-admin',
+      isAdmin: false,
+      isSystemAdmin: true,
+    });
+    expect(adminPublic.external_id).toBe('other-person@example.com');
+
+    const { service } = setup(async (action, body) => {
+      if (action === 'auth/verify') {
+        return ok({
+          valid: true,
+          user: { user_id: 'usr-target', username: 'bob', user_type: 'human' },
+        });
+      }
+      if (action === 'user/find-by-external') return ok(null);
+      if (action === 'user/get') {
+        expect(body.user_id).toBe('usr-target');
+        return ok(adminPublic);
+      }
+      throw new Error(`unexpected action ${action}`);
+    });
+
+    const pending = service.createOauth2Pending({
+      instanceId: 'inst-1',
+      identity: makeIdentity({ subject: 'alice@example.com', email: 'alice@example.com' }),
+      mode: 'create_or_bind',
+    });
+
+    await expect(
+      service.previewOauth2Bind({
+        pendingToken: pending.pendingToken,
+        userKey: 'sk-mem-existing-key',
+      }),
+    ).rejects.toMatchObject({ code: 'target_already_bound_other_identity', status: 409 });
+  });
+
+  it('getOauth2PendingView returns pending_consumed while consuming', () => {
+    const { service } = setup(async () => ok(null));
+    const pending = service.createOauth2Pending({
+      instanceId: 'inst-1',
+      identity: makeIdentity(),
+      mode: 'create_or_bind',
+    });
+    service.consumeOauth2Pending(pending.pendingToken);
+    try {
+      service.getOauth2PendingView(pending.pendingToken);
+      expect.fail('expected pending_consumed');
+    } catch (err) {
+      expect(err).toBeInstanceOf(PanelAuthError);
+      expect((err as PanelAuthError).code).toBe('pending_consumed');
+    }
+  });
 });
