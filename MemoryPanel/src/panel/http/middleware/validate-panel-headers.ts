@@ -52,7 +52,7 @@ export function validatePanelMetaHeaders(deps: PanelDeps) {
     const omitUserKey = action === AUTH_VERIFY;
     const headerUserKey = c.req.header(META_HEADER_USER_KEY)?.trim();
     const idpSession = !headerUserKey && !omitUserKey
-      ? deps.auth.resolveSession(
+      ? await deps.auth.resolveSession(
           entry.instance_id,
           readCookie(c.req.header('cookie'), deps.config.auth.sessionCookieName),
         )

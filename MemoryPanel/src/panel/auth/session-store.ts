@@ -23,9 +23,9 @@ export interface IdpSession {
 }
 
 export interface SessionStore {
-  create(input: Omit<IdpSession, 'token' | 'createdAt' | 'expiresAt'>): IdpSession;
-  get(token: string | undefined): IdpSession | null;
-  destroy(token: string | undefined): void;
+  create(input: Omit<IdpSession, 'token' | 'createdAt' | 'expiresAt'>): Promise<IdpSession>;
+  get(token: string | undefined): Promise<IdpSession | null>;
+  destroy(token: string | undefined): Promise<void>;
 }
 
 export class MemorySessionStore implements SessionStore {
@@ -33,7 +33,7 @@ export class MemorySessionStore implements SessionStore {
 
   constructor(private readonly ttlSeconds: number) {}
 
-  create(input: Omit<IdpSession, 'token' | 'createdAt' | 'expiresAt'>): IdpSession {
+  async create(input: Omit<IdpSession, 'token' | 'createdAt' | 'expiresAt'>): Promise<IdpSession> {
     const now = Date.now();
     const session: IdpSession = {
       ...input,
@@ -45,7 +45,7 @@ export class MemorySessionStore implements SessionStore {
     return session;
   }
 
-  get(token: string | undefined): IdpSession | null {
+  async get(token: string | undefined): Promise<IdpSession | null> {
     if (!token) return null;
     const session = this.sessions.get(token);
     if (!session) return null;
@@ -56,7 +56,7 @@ export class MemorySessionStore implements SessionStore {
     return session;
   }
 
-  destroy(token: string | undefined): void {
+  async destroy(token: string | undefined): Promise<void> {
     if (token) this.sessions.delete(token);
   }
 }

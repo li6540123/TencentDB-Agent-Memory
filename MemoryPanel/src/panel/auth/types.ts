@@ -83,7 +83,7 @@ export interface HeaderInjectedProvider extends AuthProvider {
 }
 
 /**
- * OAuth2 / OIDC 模式的 Provider（本 PR 尚未落地实现，接口先立位）。
+ * OAuth2 / OIDC 模式的 Provider（见 `oauth2-provider.ts`）。
  *
  * 特征：我方通过 `prepareAuthorize` 生成 authorize URL；用户浏览器回到 callback
  * 带 code + state 时，Service 侧调 `authenticateFromCallback` 换 token + userinfo。

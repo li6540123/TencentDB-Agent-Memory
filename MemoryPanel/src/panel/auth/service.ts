@@ -7,6 +7,7 @@ import type { MetaCallContext } from '../kernel/types.js';
 import { FileIdentityStore, decryptSecret, encryptSecret } from './identity-store.js';
 import { MemorySessionStore, type IdpSession, type SessionUser } from './session-store.js';
 import { AuthProviderRegistry } from './provider-registry.js';
+import { Oauth2Provider } from './oauth2-provider.js';
 import { WoaProvider } from './woa-provider.js';
 import type { ExternalIdentity, HeaderInjectedProvider } from './types.js';
 
@@ -19,7 +20,7 @@ export class PanelAuthError extends Error {
 
 export interface AuthMethodView {
   id: string;
-  type: 'user_key' | 'woa';
+  type: 'user_key' | 'woa' | 'oauth2';
   display_name: string;
   enabled: boolean;
 }
@@ -129,8 +130,7 @@ export class PanelAuthService {
     this.sessions = new MemorySessionStore(config.sessionTtlSeconds);
     this.identities = new FileIdentityStore(config.identityStorePath);
     // Provider 统一走 registry：删除历史上的私有 `this.woa` 字段。
-    // 将来接第二个 Provider（OAuth2/OIDC）时，只需在这里新增 `providers.register(...)`，
-    // 不需要在 Service 上再增加同名字段。
+    // 接第二个 Provider（OAuth2）时在这里 register，不在 Service 上再增加同名字段。
     if (config.idpEnabled && config.woa.enabled) {
       this.providers.register(new WoaProvider({
         enabled: config.woa.enabled,
@@ -144,6 +144,23 @@ export class PanelAuthService {
         authProvider: config.woa.authProvider,
       }));
     }
+    if (config.idpEnabled && config.oauth2.enabled) {
+      this.providers.register(new Oauth2Provider({
+        enabled: config.oauth2.enabled,
+        displayName: config.oauth2.displayName,
+        clientId: config.oauth2.clientId,
+        clientSecret: config.oauth2.clientSecret,
+        authorizationUrl: config.oauth2.authorizationUrl,
+        tokenUrl: config.oauth2.tokenUrl,
+        userinfoUrl: config.oauth2.userinfoUrl,
+        appUrl: config.oauth2.appUrl,
+        redirectUri: config.oauth2.redirectUri,
+        scope: config.oauth2.scope,
+        pkce: config.oauth2.pkce,
+        authProviderDomain: config.oauth2.authProviderDomain,
+        jsonPaths: config.oauth2.jsonPaths,
+      }));
+    }
   }
 
   listMethods(): AuthMethodView[] {
@@ -151,11 +168,14 @@ export class PanelAuthService {
     if (this.config.userKeyEnabled) {
       methods.push({ id: 'user_key', type: 'user_key', display_name: 'user_key', enabled: true });
     }
-    // 类型字段暂保留字面量 'woa'（前端 LoginGate.tsx / auth.ts / i18n 已按此断言）；
-    // 命名泛化列为 PR-3 的路由/契约扩展任务，与本 PR 无关。
+    // 类型字段暂保留字面量 'woa' / 'oauth2'（前端 LoginGate 等按此断言）。
     const woa = this.providers.get('woa');
     if (woa) {
       methods.push({ id: 'woa', type: 'woa', display_name: woa.displayName, enabled: true });
+    }
+    const oauth2 = this.providers.get('oauth2');
+    if (oauth2) {
+      methods.push({ id: 'oauth2', type: 'oauth2', display_name: oauth2.displayName, enabled: true });
     }
     return methods;
   }
@@ -193,7 +213,7 @@ export class PanelAuthService {
     const identity = await provider.authenticateFromHeaders(headers);
     if (!identity) throw new PanelAuthError('WOA_IDENTITY_INVALID', 'WOA identity headers are invalid', 401);
     const resolved = await this.resolveIdentity(instanceId, identity, requestId);
-    const session = this.sessions.create({
+    const session = await this.sessions.create({
       instanceId,
       coreUserId: resolved.coreUserId,
       userKey: resolved.userKey,
@@ -354,7 +374,7 @@ export class PanelAuthService {
       customUserKey: userKey,
     });
     this.consumedPendingWoa.add(input.token);
-    const session = this.sessions.create({
+    const session = await this.sessions.create({
       instanceId: pending.instanceId,
       coreUserId: resolved.coreUserId,
       userKey: resolved.userKey,
@@ -497,17 +517,17 @@ export class PanelAuthService {
     return { coreUserId: user.user_id, identity };
   }
 
-  resolveSession(instanceId: string, cookieToken: string | undefined): IdpSession | null {
-    const session = this.sessions.get(cookieToken);
+  async resolveSession(instanceId: string, cookieToken: string | undefined): Promise<IdpSession | null> {
+    const session = await this.sessions.get(cookieToken);
     return session?.instanceId === instanceId ? session : null;
   }
 
-  getSession(cookieToken: string | undefined): IdpSession | null {
+  async getSession(cookieToken: string | undefined): Promise<IdpSession | null> {
     return this.sessions.get(cookieToken);
   }
 
-  destroySession(cookieToken: string | undefined): void {
-    this.sessions.destroy(cookieToken);
+  async destroySession(cookieToken: string | undefined): Promise<void> {
+    await this.sessions.destroy(cookieToken);
   }
 
   async resolveIdentity(

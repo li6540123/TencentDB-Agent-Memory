@@ -93,8 +93,8 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
     }
   });
 
-  api.get('/auth/session', (c: Context) => {
-    const session = deps.auth.getSession(readCookie(c.req.header('cookie'), deps.config.auth.sessionCookieName));
+  api.get('/auth/session', async (c: Context) => {
+    const session = await deps.auth.getSession(readCookie(c.req.header('cookie'), deps.config.auth.sessionCookieName));
     if (!session) {
       const pending = deps.auth.getPendingWoaLogin(readCookie(c.req.header('cookie'), PENDING_WOA_COOKIE));
       if (!pending) return c.json({ authenticated: false }, 200);
@@ -260,9 +260,9 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
     return c.json({ ok: true });
   });
 
-  api.post('/auth/logout', (c: Context) => {
+  api.post('/auth/logout', async (c: Context) => {
     const token = readCookie(c.req.header('cookie'), deps.config.auth.sessionCookieName);
-    deps.auth.destroySession(token);
+    await deps.auth.destroySession(token);
     c.header('Set-Cookie', buildExpiredSessionCookie(
       deps.config.auth.sessionCookieName,
       deps.config.auth.sessionSecure,
@@ -272,9 +272,9 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
     return c.json({ ok: true });
   });
 
-  api.get('/auth/idp/woa/logout', (c: Context) => {
+  api.get('/auth/idp/woa/logout', async (c: Context) => {
     const token = readCookie(c.req.header('cookie'), deps.config.auth.sessionCookieName);
-    deps.auth.destroySession(token);
+    await deps.auth.destroySession(token);
     c.header('Set-Cookie', buildExpiredSessionCookie(
       deps.config.auth.sessionCookieName,
       deps.config.auth.sessionSecure,
@@ -319,7 +319,7 @@ export function registerWoaIngressRoutes(app: Hono, deps: PanelDeps): void {
     if (readCookie(c.req.header('cookie'), WOA_DISMISSED_COOKIE) === WOA_DISMISSED_VALUE) return next();
     const sessionToken = readCookie(c.req.header('cookie'), deps.config.auth.sessionCookieName);
     const pendingToken = readCookie(c.req.header('cookie'), PENDING_WOA_COOKIE);
-    if (deps.auth.getSession(sessionToken) || deps.auth.getPendingWoaLogin(pendingToken)) return next();
+    if (await deps.auth.getSession(sessionToken) || deps.auth.getPendingWoaLogin(pendingToken)) return next();
     const instanceId = c.req.query(INSTANCE_QUERY) || deps.instanceRegistry.listAll()[0]?.instance_id;
     if (!instanceId) return c.json({ code: 400, message: 'MISSING_INSTANCE_ID', data: null }, 400);
     const returnPath = returnTo(c.req.query(RETURN_QUERY));
