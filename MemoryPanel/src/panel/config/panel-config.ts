@@ -117,6 +117,13 @@ export interface PanelConfig {
   auth: PanelAuthConfig;
 }
 
+export interface PanelOAuth2JsonPaths {
+  subject: string;
+  login: string;
+  name: string;
+  email: string;
+}
+
 export interface PanelAuthConfig {
   userKeyEnabled: boolean;
   idpEnabled: boolean;
@@ -145,6 +152,48 @@ export interface PanelAuthConfig {
      */
     authProvider: string;
   };
+  oauth2: {
+    enabled: boolean;
+    displayName: string;
+    clientId: string;
+    clientSecret: string;
+    authorizationUrl: string;
+    tokenUrl: string;
+    userinfoUrl: string;
+    appUrl: string;
+    redirectUri: string;
+    scope: string;
+    pkce: boolean;
+    /**
+     * 写入 core `meta_users.auth_provider` 的外部域标识（OAuth2 / IAM 域）。
+     * 默认 `iam`；与 Core 侧 `METADATA_EXTERNAL_AUTH_PROVIDER` 对齐。
+     */
+    authProviderDomain: string;
+    jsonPaths: PanelOAuth2JsonPaths;
+  };
+}
+
+function stripTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+function buildOAuth2RedirectUri(appUrl: string, override: string): string {
+  if (override) return override;
+  return `${stripTrailingSlashes(appUrl)}/api/v1/auth/idp/oauth2/callback`;
+}
+
+function assertOAuth2Config(oauth2: PanelAuthConfig['oauth2']): void {
+  const missing: string[] = [];
+  if (!oauth2.clientId) missing.push('PANEL_AUTH_OAUTH2_CLIENT_ID');
+  if (!oauth2.clientSecret) missing.push('PANEL_AUTH_OAUTH2_CLIENT_SECRET');
+  if (!oauth2.authorizationUrl) missing.push('PANEL_AUTH_OAUTH2_AUTHORIZATION_URL');
+  if (!oauth2.tokenUrl) missing.push('PANEL_AUTH_OAUTH2_TOKEN_URL');
+  if (!oauth2.userinfoUrl) missing.push('PANEL_AUTH_OAUTH2_USERINFO_URL');
+  const redirectOverride = env('PANEL_AUTH_OAUTH2_REDIRECT_URI', '');
+  if (!redirectOverride && !oauth2.appUrl) missing.push('PANEL_AUTH_OAUTH2_APP_URL');
+  if (missing.length > 0) {
+    throw new Error(`OAuth2 auth is enabled but required configuration is missing: ${missing.join(', ')}`);
+  }
 }
 
 function buildAuthConfig(): PanelAuthConfig {
@@ -160,7 +209,8 @@ function buildAuthConfig(): PanelAuthConfig {
   );
   let userKeyEnabled = modes.has('user_key');
   const woaEnabled = modes.has('woa');
-  const idpEnabled = woaEnabled || modes.has('idp');
+  const oauth2Enabled = modes.has('oauth2');
+  const idpEnabled = woaEnabled || modes.has('idp') || oauth2Enabled;
   // 配置健壮性：user_key 是零配置默认登录方式。
   // 若解析后既没有 user_key 也没有任何 IdP（例如 PANEL_AUTH_MODE 填了未识别值、
   // 或未来 legacy 变量被移除后漏配），退化为"启用 user_key"，
@@ -169,14 +219,41 @@ function buildAuthConfig(): PanelAuthConfig {
     userKeyEnabled = true;
   }
   const appUrl = envFirst(['PANEL_AUTH_WOA_APP_URL', 'PANEL_AUTH_IDP_WOA_APP_URL'], '');
+  const oauth2AppUrl = env('PANEL_AUTH_OAUTH2_APP_URL', '');
+  const oauth2RedirectOverride = env('PANEL_AUTH_OAUTH2_REDIRECT_URI', '');
   const identityStorePath = env('PANEL_AUTH_IDENTITY_STORE_PATH', './data/panel-auth-identities.json');
+  const oauth2: PanelAuthConfig['oauth2'] = {
+    enabled: oauth2Enabled,
+    displayName: env('PANEL_AUTH_OAUTH2_DISPLAY_NAME', '公司IAM登录'),
+    clientId: env('PANEL_AUTH_OAUTH2_CLIENT_ID', ''),
+    clientSecret: env('PANEL_AUTH_OAUTH2_CLIENT_SECRET', ''),
+    authorizationUrl: env('PANEL_AUTH_OAUTH2_AUTHORIZATION_URL', ''),
+    tokenUrl: env('PANEL_AUTH_OAUTH2_TOKEN_URL', ''),
+    userinfoUrl: env('PANEL_AUTH_OAUTH2_USERINFO_URL', ''),
+    appUrl: oauth2AppUrl,
+    redirectUri: buildOAuth2RedirectUri(oauth2AppUrl, oauth2RedirectOverride),
+    scope: env('PANEL_AUTH_OAUTH2_SCOPE', ''),
+    pkce: envBool('PANEL_AUTH_OAUTH2_PKCE', false),
+    authProviderDomain: envFirst(['METADATA_EXTERNAL_AUTH_PROVIDER', 'PANEL_AUTH_OAUTH2_AUTH_PROVIDER'], 'iam'),
+    jsonPaths: {
+      subject: env('PANEL_AUTH_OAUTH2_SUBJECT_JSONPATH', 'email'),
+      login: env('PANEL_AUTH_OAUTH2_LOGIN_JSONPATH', 'username'),
+      name: env('PANEL_AUTH_OAUTH2_NAME_JSONPATH', 'nickname'),
+      email: env('PANEL_AUTH_OAUTH2_EMAIL_JSONPATH', 'email'),
+    },
+  };
+  if (oauth2Enabled) {
+    assertOAuth2Config(oauth2);
+  }
+
+  const sessionSecureFallback = (oauth2AppUrl || appUrl).startsWith('https://');
 
   return {
     userKeyEnabled,
     idpEnabled,
     sessionTtlSeconds: envInt('PANEL_AUTH_SESSION_TTL_SECONDS', 28_800),
     sessionCookieName: env('PANEL_AUTH_SESSION_COOKIE_NAME', 'tdai_idp_session'),
-    sessionSecure: envBoolFirst(['PANEL_AUTH_SESSION_SECURE'], appUrl.startsWith('https://')),
+    sessionSecure: envBoolFirst(['PANEL_AUTH_SESSION_SECURE'], sessionSecureFallback),
     // 仅在启用 IdP 时才需要密钥；未启用时留空，避免非 WOA 部署也生成密钥文件。
     sessionSecret: idpEnabled ? resolveSessionSecret(identityStorePath) : '',
     identityStorePath,
@@ -201,6 +278,7 @@ function buildAuthConfig(): PanelAuthConfig {
         'local',
       ),
     },
+    oauth2,
   };
 }
 
