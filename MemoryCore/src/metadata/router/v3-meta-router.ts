@@ -107,6 +107,15 @@ const routeTable: Record<string, Handler> = {
     s.assertCanManageUsers(c);
     return s.bindExternalIdToUser(d.user_id, d.external_id, d.auth_provider, d.display_name);
   }),
+  // IdP / SSO 登录后覆盖展示字段；仅 system_admin。不改 external_id / auth_provider / user_type。
+  [`${V3_PREFIX}/user/update`]: bind(S.userUpdateSchema, async (d, c, s) => {
+    s.assertCanManageUsers(c);
+    return s.updateUserProfileForAdmin(d.user_id, {
+      username: d.username,
+      email: d.email,
+      display_name: d.display_name,
+    });
+  }),
   [`${V3_PREFIX}/user/get`]: bind(S.userGetSchema, async (d, c, s) => {
     const userId = await resolveUserId(s, d);
     return s.getUserForCaller(userId, c);

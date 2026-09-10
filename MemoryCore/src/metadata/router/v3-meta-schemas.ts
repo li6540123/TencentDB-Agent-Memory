@@ -91,6 +91,19 @@ export const userCreateWithKeySchema = z.object({
   display_name: z.string().min(1).optional(),
   email: z.string().email().optional(),
 });
+
+/**
+ * IdP / SSO 登录后覆盖展示资料（仅 system_admin）。
+ * 白名单：username / email / display_name。
+ * 不接受（zod 默认 strip）：external_id / auth_provider / user_type。
+ */
+export const userUpdateSchema = z.object({
+  user_id: nonEmpty,
+  username: nonEmpty.optional(),
+  email: z.string().email().optional(),
+  display_name: z.string().min(1).optional(),
+});
+
 export const initAdminSchema = z.object({
   username: nonEmpty,
   user_key: z.string().min(1).optional(),
@@ -471,6 +484,7 @@ export const instanceUpstreamResetSchema = z.object({
 export const V3_SCHEMAS = {
   "/v3/meta/user/create": userCreateSchema,
   "/v3/meta/user/create-with-key": userCreateWithKeySchema,
+  "/v3/meta/user/update": userUpdateSchema,
   "/v3/meta/user/get": userGetSchema,
   "/v3/meta/user/delete": userDeleteSchema,
   "/v3/meta/user/list": userListSchema,

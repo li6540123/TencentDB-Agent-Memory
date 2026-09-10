@@ -601,6 +601,33 @@ export class MetadataService {
     return updated;
   }
 
+  /**
+   * 仅供 /v3/meta/user/update：system_admin 覆盖 IdP 展示资料。
+   *
+   * 白名单：username / email / display_name。
+   * **禁止**改 external_id / auth_provider / user_type（schema 不收；本方法也不写）。
+   * router 层需先调 assertCanManageUsers 做鉴权。
+   */
+  async updateUserProfileForAdmin(
+    userId: string,
+    patch: { username?: string; email?: string; display_name?: string },
+  ): Promise<UserEntity> {
+    await this.requireUser(userId);
+
+    const allowed: Partial<Pick<UserEntity, "username" | "email" | "display_name">> = {};
+    if (patch.username !== undefined) allowed.username = patch.username;
+    if (patch.email !== undefined) allowed.email = patch.email;
+    if (patch.display_name !== undefined) allowed.display_name = patch.display_name;
+
+    if (Object.keys(allowed).length === 0) {
+      return this.requireUser(userId);
+    }
+
+    const updated = await this.store.updateUser(userId, allowed);
+    if (!updated) throw new MetadataError("user_not_found", `user not found: ${userId}`);
+    return updated;
+  }
+
   async deleteUsersForCaller(userIds: string[], ctx: V3AuthContext): Promise<BatchDeleteResult> {
     if (!canManageUsers(ctx)) {
       throw new MetadataError("permission_denied", "user management requires system admin");
