@@ -1,9 +1,8 @@
 /**
  * Auth Store (zustand)
  *
- * 对接新面板 Control（无 Cookie、无状态代理，见 09 设计文档 §3.3）。
- * 登录凭证（instance_id + user_key）缓存在 localStorage（lib/panelSession.ts），
- * "退出登录"/"会话失效"都只是清本地缓存，Control 无登出 API、无服务端会话表。
+ * 登录凭证（instance_id + user_key）可缓存在 localStorage；IdP（oauth2/woa）另有
+ * HttpOnly Cookie 会话。退出必须先 POST /api/v1/auth/logout，再清本地缓存。
  *
  * 多 tab 同步：通过 storage 事件监听 localStorage 变化。
  *   - 其他 tab 登录 → 本 tab 自动恢复登录态（checkSession）
@@ -16,6 +15,7 @@
  */
 import { create } from 'zustand';
 import { readAuth, clearAuth, resumeSession, type AuthState } from '@/components/LoginGate';
+import { authMethodsApi } from '@/lib/api/auth';
 import { onUnauthorized } from '@/lib/teamApi';
 import { clearBackendCache, writeActiveTeamId } from '@/services';
 
@@ -25,7 +25,7 @@ interface AuthStore {
   auth: AuthState | null | undefined;
   /** 登录成功后写入（LoginGate 的 onLoggedIn 回调） */
   setAuth: (auth: AuthState) => void;
-  /** 退出登录：清本地 localStorage 会话，回到 LoginGate（无后端调用） */
+  /** 退出登录：先 POST /auth/logout 清 IdP Cookie，再清 localStorage */
   logout: () => Promise<void>;
   /** App 启动时读取 localStorage 缓存；不管结果如何都会把 auth 从 null 推进到确定态 */
   checkSession: () => Promise<void>;
@@ -39,7 +39,12 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   logout: async () => {
-    // 新面板无服务端会话，登出即清本地缓存，无需（也没有）后端登出接口。
+    // IdP Cookie 必须先由后端销毁；失败仍清本地，避免卡在半登出态。
+    try {
+      await authMethodsApi.logout();
+    } catch {
+      /* ignore — local clear below still runs */
+    }
     // 清模块级后端缓存（teams/agents/tasks），避免新用户登录后短暂看到上一个用户的列表。
     // 用 clearBackendCache 而非 invalidateBackendCache：后者会广播事件触发已挂载页面的
     // refetch listener，此时还在用旧 session Header 发请求，会把旧数据重新拉回来；

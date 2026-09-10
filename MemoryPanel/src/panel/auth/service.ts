@@ -87,6 +87,16 @@ export type ResolveOauth2LoginResult =
     };
 
 const OAUTH2_PENDING_TTL_MS = 5 * 60 * 1000;
+const OAUTH2_STATE_TTL_MS = 5 * 60 * 1000;
+
+/** OAuth2 authorize `state`（一次性；callback 校验后立即删除）。 */
+interface Oauth2LoginState {
+  state: string;
+  instanceId: string;
+  returnTo: string;
+  codeVerifier?: string;
+  expiresAt: number;
+}
 
 /**
  * 用户自填 user_key 的格式约束。
@@ -161,6 +171,8 @@ export class PanelAuthService {
   private readonly consumedPendingWoa = new Set<string>();
   /** OAuth2 pending：token → state；过期靠 get/consume 时惰性清理。 */
   private readonly oauth2Pending = new Map<string, Oauth2PendingState>();
+  /** OAuth2 authorize state → instance/returnTo/PKCE；callback 一次性消费。 */
+  private readonly oauth2LoginStates = new Map<string, Oauth2LoginState>();
 
   constructor(dependencies: PanelAuthDependencies) {
     const { config, instances, metaKernel, logger } = dependencies;
@@ -937,7 +949,7 @@ export class PanelAuthService {
   }
 
   // ---------------------------------------------------------------------------
-  // OAuth2 / IAM：resolve、pending、建号/绑号、资料覆盖
+  // OAuth2 / IAM：login state、resolve、pending、建号/绑号、资料覆盖
   // ---------------------------------------------------------------------------
 
   private requireOauth2(): RedirectOAuth2Provider {
@@ -946,6 +958,75 @@ export class PanelAuthService {
       throw new PanelAuthError('AUTH_METHOD_DISABLED', 'OAuth2 authentication is disabled', 404);
     }
     return provider as RedirectOAuth2Provider;
+  }
+
+  /**
+   * GET .../oauth2/login：写一次性 state，返回 IdP authorize URL。
+   * instance_id 只存在服务端 state 里，不进 redirect_uri（IdP 精确匹配白名单）。
+   */
+  async beginOauth2Login(instanceId: string, returnTo = '/'): Promise<string> {
+    const provider = this.requireOauth2();
+    this.requireInstance(instanceId);
+    const state = randomUUID();
+    const prepared = await provider.prepareAuthorize({
+      state,
+      redirectUri: this.config.oauth2.redirectUri,
+    });
+    this.oauth2LoginStates.set(state, {
+      state,
+      instanceId,
+      returnTo: this.safeReturnTo(returnTo),
+      codeVerifier: prepared.codeVerifier,
+      expiresAt: Date.now() + OAUTH2_STATE_TTL_MS,
+    });
+    return prepared.url;
+  }
+
+  /**
+   * GET .../oauth2/callback：校验并 **立即 DEL** state → 换 identity → resolve。
+   * 无/过期 state → invalid_state；IdP 换票失败 → oauth2_callback_failed。
+   */
+  async completeOauth2Callback(input: {
+    state: string | undefined;
+    code: string | undefined;
+    requestId?: string;
+  }): Promise<ResolveOauth2LoginResult & { returnTo: string }> {
+    this.requireOauth2();
+    if (!input.state) {
+      throw new PanelAuthError('invalid_state', 'OAuth2 state is missing', 400);
+    }
+    if (!input.code) {
+      throw new PanelAuthError('invalid_code', 'OAuth2 authorization code is missing', 400);
+    }
+
+    const loginState = this.oauth2LoginStates.get(input.state);
+    // 无论是否过期，命中即删除，防 code/state 重放。
+    if (loginState) this.oauth2LoginStates.delete(input.state);
+    if (!loginState || loginState.expiresAt <= Date.now()) {
+      throw new PanelAuthError('invalid_state', 'OAuth2 state is invalid or expired', 400);
+    }
+
+    const provider = this.requireOauth2();
+    const identity = await provider.authenticateFromCallback({
+      code: input.code,
+      redirectUri: this.config.oauth2.redirectUri,
+      codeVerifier: loginState.codeVerifier,
+    });
+    if (!identity) {
+      throw new PanelAuthError(
+        'oauth2_callback_failed',
+        'OAuth2 identity exchange failed',
+        401,
+      );
+    }
+
+    const result = await this.resolveOauth2Login({
+      instanceId: loginState.instanceId,
+      identity,
+      returnTo: loginState.returnTo,
+      requestId: input.requestId,
+    });
+    return { ...result, returnTo: loginState.returnTo };
   }
 
   /** 本次 identity 所属 Provider 的 Core auth_provider 域（woa / iam …）。 */

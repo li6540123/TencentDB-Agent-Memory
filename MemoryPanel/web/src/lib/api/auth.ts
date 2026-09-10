@@ -1,12 +1,13 @@
 /**
- * api/auth.ts — 登录验活 + 环境绑定。
+ * api/auth.ts — 登录验活 + 环境绑定 + IdP（WOA / OAuth2）。
  *
- * 登录流程：
+ * 登录流程（user_key）：
  *   ① GET /meta/instances 选实例
  *   ② 用户输入自持的 user_key（sk-mem-…）
  *   ③ POST /meta/auth/verify（Header 仅 X-Tdai-Service-Id，body 带 user_key）
  *   ④ data.valid === true → 登录成功，前端把 { instance_id, user_key, user } 写入 session
- * 无 OAuth、无 Cookie；见 lib/panelSession.ts。
+ *
+ * IdP（oauth2 / woa）会话走 HttpOnly Cookie；登出必须先 POST /auth/logout 再清 localStorage。
  */
 import { request, metaCall } from './base';
 import type { PublicUser } from './types';
@@ -23,7 +24,7 @@ export const authVerifyApi = {
 
 export interface AuthMethod {
   id: string;
-  type: 'user_key' | 'woa';
+  type: 'user_key' | 'woa' | 'oauth2';
   display_name: string;
   enabled: boolean;
 }
@@ -67,6 +68,11 @@ export const authMethodsApi = {
   loginWoa: (instanceId: string, returnTo = '/') => {
     const params = new URLSearchParams({ instance_id: instanceId, return_to: returnTo });
     window.location.assign(`/api/v1/auth/idp/woa/login?${params.toString()}`);
+  },
+  /** 公司 IAM OAuth2：整页跳到 Panel login → 302 IdP。 */
+  loginOauth2: (instanceId: string, returnTo = '/') => {
+    const params = new URLSearchParams({ instance_id: instanceId, return_to: returnTo });
+    window.location.assign(`/api/v1/auth/idp/oauth2/login?${params.toString()}`);
   },
   session: (instanceId?: string) => {
     const query = instanceId ? `?instance_id=${encodeURIComponent(instanceId)}` : '';
@@ -139,6 +145,60 @@ export const authMethodsApi = {
    * 否则之前落下的抑制标记会让 WOA ingress 直接放行、停在 user_key 表单。
    */
   resumeWoa: () => request<{ ok: boolean }>('POST', '/api/v1/auth/idp/woa/resume'),
+
+  /** OAuth2 首次确认：读取 pending 展示身份（无 sk-mem）。 */
+  getOauth2Pending: (pendingToken: string) =>
+    request<{
+      instance_id: string;
+      display_name?: string;
+      login_name: string;
+      email?: string;
+      mode: 'create_or_bind' | 'bind_only';
+      expires_at: number;
+    }>('GET', `/api/v1/auth/idp/oauth2/pending?pending=${encodeURIComponent(pendingToken)}`),
+
+  /** OAuth2 自动建号；成功响应带 Set-Cookie。user_key 仅此一次，禁止写入 localStorage。 */
+  confirmOauth2Create: (pendingToken: string) =>
+    request<{
+      authenticated: boolean;
+      instance_id: string;
+      user_id: string;
+      user?: PublicUser;
+      user_key?: string;
+      redirect_url?: string;
+    }>('POST', '/api/v1/auth/idp/oauth2/confirm-create', {
+      pending_token: pendingToken,
+    }),
+
+  /** OAuth2 绑老号预览（不消费 pending）。 */
+  previewOauth2Bind: (pendingToken: string, userKey: string) =>
+    request<{
+      user_id: string;
+      username?: string;
+      email?: string;
+    }>('POST', '/api/v1/auth/idp/oauth2/confirm-bind/preview', {
+      pending_token: pendingToken,
+      user_key: userKey,
+    }),
+
+  /** OAuth2 绑老号确认；成功响应带 Set-Cookie。 */
+  confirmOauth2Bind: (pendingToken: string, userKey: string) =>
+    request<{
+      authenticated: boolean;
+      instance_id: string;
+      user_id: string;
+      user?: PublicUser;
+      redirect_url?: string;
+    }>('POST', '/api/v1/auth/idp/oauth2/confirm-bind', {
+      pending_token: pendingToken,
+      user_key: userKey,
+    }),
+
+  /**
+   * 登出：先清服务端 IdP Cookie 会话，再由调用方清 localStorage。
+   * user_key-only 部署下后端仍返回 ok（无 session 亦可）。
+   */
+  logout: () => request<{ ok: boolean }>('POST', '/api/v1/auth/logout'),
 };
 
 // ========================= Environment Bindings =========================

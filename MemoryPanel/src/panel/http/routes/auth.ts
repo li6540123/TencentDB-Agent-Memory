@@ -38,10 +38,18 @@ function handleAuthError(c: Context, err: unknown): Response {
   if (err instanceof PanelAuthError) {
     return c.json(
       { code: err.status, message: err.code, request_id: c.get('reqId') ?? '', data: null },
-      err.status as 400 | 401 | 403 | 404 | 500,
+      err.status as 400 | 401 | 403 | 404 | 409 | 500,
     );
   }
   throw err;
+}
+
+function readBodyString(body: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = body[key];
+    if (typeof value === 'string') return value;
+  }
+  return '';
 }
 
 export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
@@ -258,6 +266,147 @@ export function registerAuthRoutes(api: Hono, deps: PanelDeps): void {
   api.post('/auth/idp/woa/resume', (c: Context) => {
     c.header('Set-Cookie', buildExpiredSessionCookie(WOA_DISMISSED_COOKIE, deps.config.auth.sessionSecure));
     return c.json({ ok: true });
+  });
+
+  // ── OAuth2 / IAM（RedirectOAuth2Provider）────────────────────────────────
+  //
+  // 与 WOA 并列的 redirect 登录：login 写 state → IdP → callback 一次性消费 state。
+  // 已有用户 Set-Cookie；首次写 pending 后 302 `/?pending=`（挂 LoginGate，勿只跳 /confirm）。
+  // 未启用时 login/callback 302 `/`，与 WOA GET 降级一致。
+  const isOauth2Enabled = () => deps.auth.listMethods().some((m) => m.type === 'oauth2');
+
+  api.get('/auth/idp/oauth2/login', async (c: Context) => {
+    if (!isOauth2Enabled()) return c.redirect('/', 302);
+    try {
+      const instanceId = c.req.query(INSTANCE_QUERY);
+      if (!instanceId) return c.json({ code: 400, message: 'MISSING_INSTANCE_ID', data: null }, 400);
+      const url = await deps.auth.beginOauth2Login(
+        instanceId,
+        returnTo(c.req.query(RETURN_QUERY)),
+      );
+      return c.redirect(url, 302);
+    } catch (err) {
+      return handleAuthError(c, err);
+    }
+  });
+
+  api.get('/auth/idp/oauth2/callback', async (c: Context) => {
+    if (!isOauth2Enabled()) return c.redirect('/', 302);
+    try {
+      const result = await deps.auth.completeOauth2Callback({
+        state: c.req.query('state'),
+        code: c.req.query('code'),
+        requestId: c.get('reqId'),
+      });
+      if (result.kind === 'authenticated') {
+        c.header('Set-Cookie', buildSessionCookie(
+          deps.config.auth.sessionCookieName,
+          result.session.token,
+          deps.config.auth.sessionTtlSeconds,
+          deps.config.auth.sessionSecure,
+        ));
+        return c.redirect(result.returnTo, 302);
+      }
+      // 首次确认：不 Set-Cookie；pending 走 query 进 LoginGate。
+      return c.redirect(`/?pending=${encodeURIComponent(result.pending.pendingToken)}`, 302);
+    } catch (err) {
+      return handleAuthError(c, err);
+    }
+  });
+
+  api.get('/auth/idp/oauth2/pending', (c: Context) => {
+    try {
+      const pending = c.req.query('pending');
+      const view = deps.auth.getOauth2PendingView(pending);
+      return c.json(view);
+    } catch (err) {
+      return handleAuthError(c, err);
+    }
+  });
+
+  api.post('/auth/idp/oauth2/confirm-create', async (c: Context) => {
+    try {
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const pendingToken = readBodyString(body, 'pending_token', 'pendingToken');
+      if (!pendingToken) {
+        return c.json({ code: 400, message: 'MISSING_PENDING_TOKEN', data: null }, 400);
+      }
+      const result = await deps.auth.confirmOauth2Create({
+        pendingToken,
+        requestId: c.get('reqId'),
+      });
+      c.header('Set-Cookie', buildSessionCookie(
+        deps.config.auth.sessionCookieName,
+        result.session.token,
+        deps.config.auth.sessionTtlSeconds,
+        deps.config.auth.sessionSecure,
+      ));
+      return c.json({
+        authenticated: true,
+        instance_id: result.session.instanceId,
+        user_id: result.session.coreUserId,
+        user: result.session.user,
+        // 一次性 sk-mem：禁止写入 localStorage；前端对话框关闭后清 React state。
+        user_key: result.userKeyDisplay,
+        redirect_url: result.redirectUrl,
+      });
+    } catch (err) {
+      return handleAuthError(c, err);
+    }
+  });
+
+  api.post('/auth/idp/oauth2/confirm-bind/preview', async (c: Context) => {
+    try {
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const pendingToken = readBodyString(body, 'pending_token', 'pendingToken');
+      const userKey = readBodyString(body, 'user_key', 'userKey');
+      if (!pendingToken) {
+        return c.json({ code: 400, message: 'MISSING_PENDING_TOKEN', data: null }, 400);
+      }
+      const preview = await deps.auth.previewOauth2Bind({
+        pendingToken,
+        userKey,
+        requestId: c.get('reqId'),
+      });
+      return c.json({
+        user_id: preview.userId,
+        username: preview.username,
+        email: preview.email,
+      });
+    } catch (err) {
+      return handleAuthError(c, err);
+    }
+  });
+
+  api.post('/auth/idp/oauth2/confirm-bind', async (c: Context) => {
+    try {
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const pendingToken = readBodyString(body, 'pending_token', 'pendingToken');
+      const userKey = readBodyString(body, 'user_key', 'userKey');
+      if (!pendingToken) {
+        return c.json({ code: 400, message: 'MISSING_PENDING_TOKEN', data: null }, 400);
+      }
+      const result = await deps.auth.confirmOauth2Bind({
+        pendingToken,
+        userKey,
+        requestId: c.get('reqId'),
+      });
+      c.header('Set-Cookie', buildSessionCookie(
+        deps.config.auth.sessionCookieName,
+        result.session.token,
+        deps.config.auth.sessionTtlSeconds,
+        deps.config.auth.sessionSecure,
+      ));
+      return c.json({
+        authenticated: true,
+        instance_id: result.session.instanceId,
+        user_id: result.session.coreUserId,
+        user: result.session.user,
+        redirect_url: result.redirectUrl,
+      });
+    } catch (err) {
+      return handleAuthError(c, err);
+    }
   });
 
   api.post('/auth/logout', async (c: Context) => {
