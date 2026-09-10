@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Logger } from '../infra/logger.js';
 import type { PanelAuthConfig } from '../config/panel-config.js';
 import { InstanceRegistry } from '../config/instance-registry.js';
@@ -9,7 +9,7 @@ import { MemorySessionStore, type IdpSession, type SessionUser } from './session
 import { AuthProviderRegistry } from './provider-registry.js';
 import { Oauth2Provider } from './oauth2-provider.js';
 import { WoaProvider } from './woa-provider.js';
-import type { ExternalIdentity, HeaderInjectedProvider } from './types.js';
+import type { ExternalIdentity, HeaderInjectedProvider, RedirectOAuth2Provider } from './types.js';
 
 export class PanelAuthError extends Error {
   constructor(readonly code: string, message: string, readonly status = 401) {
@@ -40,6 +40,53 @@ export interface PendingWoaLogin {
   identity: ExternalIdentity;
   expiresAt: number;
 }
+
+/** OAuth2 确认页 pending：真·首次 vs 仅缺有效 key。 */
+export type Oauth2PendingMode = 'create_or_bind' | 'bind_only';
+
+export type Oauth2PendingStatus = 'open' | 'consuming';
+
+/**
+ * OAuth2 首次/绑 key 确认态（内存 Map；Redis 见 Task 8）。
+ * TTL 300s；消费顺序：open → consuming → 成功后删除（禁止先删再 create）。
+ */
+export interface Oauth2PendingState {
+  pendingToken: string;
+  instanceId: string;
+  providerId: string;
+  externalSubject: string;
+  identity: ExternalIdentity;
+  returnTo: string;
+  createdAt: number;
+  expiresAt: number;
+  status: Oauth2PendingStatus;
+  mode: Oauth2PendingMode;
+  /** preview 通过后写入 sha256(userKey)，confirm 再校验。 */
+  verifiedUserKeyHash?: string;
+}
+
+/** GET .../oauth2/pending 对外视图（不含 sk-mem / token 明文）。 */
+export interface Oauth2PendingView {
+  instance_id: string;
+  display_name?: string;
+  login_name: string;
+  email?: string;
+  mode: Oauth2PendingMode;
+  expires_at: number;
+}
+
+export type ResolveOauth2LoginResult =
+  | {
+      kind: 'authenticated';
+      session: IdpSession;
+      identity: ExternalIdentity;
+    }
+  | {
+      kind: 'pending';
+      pending: Oauth2PendingState;
+    };
+
+const OAUTH2_PENDING_TTL_MS = 5 * 60 * 1000;
 
 /**
  * 用户自填 user_key 的格式约束。
@@ -112,6 +159,8 @@ export class PanelAuthService {
   private readonly identities: FileIdentityStore;
   private readonly providers = new AuthProviderRegistry();
   private readonly consumedPendingWoa = new Set<string>();
+  /** OAuth2 pending：token → state；过期靠 get/consume 时惰性清理。 */
+  private readonly oauth2Pending = new Map<string, Oauth2PendingState>();
 
   constructor(dependencies: PanelAuthDependencies) {
     const { config, instances, metaKernel, logger } = dependencies;
@@ -588,25 +637,27 @@ export class PanelAuthService {
     const context = this.context(entry, entry.api_key, requestId);
 
     // 按 external_id 反查两类账号，二者的 auth_provider 不同：
-    //   ① WOA 首次登录新建的号 → provisionIdentity 建号时 auth_provider=woa；
-    //   ② 存量账号绑定 WOA 的号 → Core bindExternalIdentity 故意"只写 external_id、
-    //      不改 auth_provider"，仍保持建号时的 provider（通常是 local）。
-    // 因此单一 provider 会漏掉另一类，需按 woa → 默认(local) 依次反查。
-    // 不会误命中：未绑定外部身份的账号 external_id 兜底为 usr-xxx 格式，与工号数字不同。
-    const coreUserId = await this.lookupCoreUserByExternal(externalId, context);
+    //   ① IdP 首次登录新建的号 → provisionIdentity 建号时 auth_provider=该 Provider 域；
+    //   ② 存量账号绑定外部身份的号 → 可能仍保持建号时的 provider（通常是 local）。
+    // 因此单一 provider 会漏掉另一类，需按「本次 Provider 域 → 默认(local)」依次反查。
+    // 不会误命中：未绑定外部身份的账号 external_id 兜底为 usr-xxx 格式，与工号/email 不同。
+    const authProviderDomain = this.authProviderDomainOf(identity);
+    const coreUserId = await this.lookupCoreUserByExternal(externalId, context, authProviderDomain);
     if (!coreUserId) return null;
 
     // 为反查到的账号签发一把新 user_key（Core 不下发既有 key 明文）。
+    const keyName = identity.providerId === 'oauth2' ? 'oauth2-login' : 'woa-login';
     const issued = await this.metaKernel.invoke(
       'user-key/create',
-      { user_id: coreUserId, name: 'woa-login' },
+      { user_id: coreUserId, name: keyName },
       context,
     );
     if (issued?.code !== 0 || !issued.data || typeof issued.data !== 'object') {
       // 达到活跃 key 上限等情况：不硬失败卡死，返回 null 让上层走首次登录 pending，
       // 由用户在确认页用自己的一把 user_key 完成绑定（该 key 会被复用，不再新签）。
-      this.logger.warn('WOA core-fallback key issue failed, degrading to pending', {
-        instanceId, coreUserId, code: issued?.code, message: issued?.message,
+      this.logger.warn('IdP core-fallback key issue failed, degrading to pending', {
+        instanceId, coreUserId, providerId: identity.providerId,
+        code: issued?.code, message: issued?.message,
       });
       return null;
     }
@@ -632,18 +683,18 @@ export class PanelAuthService {
    * 按 external_id 反查 Core 账号，覆盖两类不同 auth_provider 的账号。
    *
    * 依次尝试：
-   *   ① auth_provider=woa —— WOA 首次登录新建的号；
-   *   ② 省略 auth_provider（Core 兜底为 local）—— 存量账号绑定 WOA 的号。
+   *   ① auth_provider=本次 Provider 域（如 woa / iam）—— IdP 首次登录新建的号；
+   *   ② 省略 auth_provider（Core 兜底为 local）—— 存量账号绑定外部身份的号。
    * 命中即返回 user_id；都未命中返回 null（交由上层按首次登录处理）。
+   *
+   * domain 必须由调用方传入（来自本次 identity 所属 Provider），禁止写死 requireWoa()。
    */
   private async lookupCoreUserByExternal(
     externalId: string,
     context: ReturnType<PanelAuthService['context']>,
+    authProviderDomain: string,
   ): Promise<string | null> {
-    // 当前只挂 WOA 一个 Provider，直接用 requireWoa().authProviderDomain 与
-    // config.woa.authProvider 等价；接第二个 Provider 时，该 domain 应改为
-    // "本次处理的 identity 所属 Provider 的 domain"（沿调用链传入 identity.providerId）。
-    const providers: Array<string | undefined> = [this.requireWoa().authProviderDomain, undefined];
+    const providers: Array<string | undefined> = [authProviderDomain, undefined];
     const tried = new Set<string>();
     for (const provider of providers) {
       const dedupKey = provider ?? '__default__';
@@ -653,7 +704,7 @@ export class PanelAuthService {
       if (provider) body.auth_provider = provider;
       const found = await this.metaKernel.invoke('user/find-by-external', body, context);
       if (found?.code !== 0) {
-        this.logger.warn('WOA core-fallback find-by-external errored', {
+        this.logger.warn('IdP core-fallback find-by-external errored', {
           provider: dedupKey, code: found?.code, message: found?.message,
         });
         continue;
@@ -691,7 +742,7 @@ export class PanelAuthService {
     await this.metaKernel.invoke('user/bind-external', {
       user_id: coreUserId,
       external_id: externalAuthId,
-      auth_provider: this.requireWoa().authProviderDomain,
+      auth_provider: this.authProviderDomainOf(identity),
       display_name: identity.displayName?.trim() || undefined,
     }, context);
   }
@@ -711,9 +762,13 @@ export class PanelAuthService {
     const alreadyBound = this.identities.find(instanceId, identity.providerId, identity.subject);
     if (alreadyBound) return this.resolveIdentity(instanceId, identity, requestId);
     // WOA 建号：username 默认取 WOA 登录名（可在确认页修改），与 user_id 解耦。
+    // OAuth2：非法字符换成 `_`（公司 nickname / email local-part 可能含点号等）。
     // user_id **不**使用登录名，交给内核按 admin「新建并绑定账号」同一套逻辑生成 usr-xxx，
     // 避免把外部身份标识写进主键（改名/重名/跨 IdP 冲突会直接破坏归属关系）。
-    const username = (input.username || identity.loginName || identity.subject).trim();
+    const rawUsername = (input.username || identity.loginName || identity.subject).trim();
+    const username = identity.providerId === 'oauth2'
+      ? this.sanitizeHubUsername(rawUsername)
+      : rawUsername;
     if (!/^[A-Za-z0-9_-]+$/.test(username)) {
       throw new PanelAuthError('INVALID_USERNAME', 'username must contain only letters, numbers, underscores, or hyphens', 400);
     }
@@ -725,6 +780,7 @@ export class PanelAuthService {
     // 单一凭证来源（见 §12.3）：统一用实例 api_key，不再另设 admin key 配置项。
     // 部署前提：实例 api_key 必须能在 core 侧解析为 system_admin，否则建号 401。
     const context = this.context(entry, entry.api_key, requestId);
+    const authProviderDomain = this.authProviderDomainOf(identity);
 
     // 存量账号接入：用户给的 key 若在系统内已存在，把外部身份绑定到**那个已有账号**，
     // 而不是新建——这样老数据（memories/teams/skills）原样保留。
@@ -757,7 +813,7 @@ export class PanelAuthService {
     // "已建号、未绑定"的孤儿账号。
     const identityFields = {
       external_id: this.externalAuthIdOf(identity) || undefined,
-      auth_provider: this.requireWoa().authProviderDomain,
+      auth_provider: authProviderDomain,
       display_name: identity.displayName?.trim() || undefined,
       ...(identity.email?.trim() ? { email: identity.email.trim() } : {}),
     };
@@ -774,7 +830,7 @@ export class PanelAuthService {
       if (raw.includes('duplicate') || raw.includes('already exists')) {
         throw new PanelAuthError('WOA_USER_ALREADY_EXISTS', 'a user with this id already exists', 409);
       }
-      throw new PanelAuthError('WOA_PROVISION_FAILED', raw || 'failed to provision WOA user', 502);
+      throw new PanelAuthError('WOA_PROVISION_FAILED', raw || 'failed to provision IdP user', 502);
     }
     const result = created.data as { user_id?: unknown; default_user_key?: unknown };
     if (typeof result.user_id !== 'string' || typeof result.default_user_key !== 'string') {
@@ -783,7 +839,8 @@ export class PanelAuthService {
     // 新建的账号也要写外部认证关联，否则下次登录查不到、会被当成初次再让填一次 key。
     // 放在加团队之前：关联比加团队更基础，先确保身份链路完整。
     await this.bindExternalAuth(result.user_id, identity, context);
-    if (this.config.woa.defaultTeamId) {
+    // 仅 WOA 自动加默认团队；OAuth2 / IAM 明确不加入任何团队。
+    if (identity.providerId === 'woa' && this.config.woa.defaultTeamId) {
       // team-member/add 需 system_admin。凭证与建号保持一致（实例 api_key），
       // 全程只用这一个来源，避免两套 admin 凭证。
       const added = await this.metaKernel.invoke('team-member/add', {
@@ -804,7 +861,7 @@ export class PanelAuthService {
       displayName: identity.displayName ?? identity.loginName,
       updatedAt: new Date().toISOString(),
     });
-    this.logger.info('WOA identity provisioned', {
+    this.logger.info('IdP identity provisioned', {
       instanceId,
       providerId: identity.providerId,
       externalSubject: identity.subject,
@@ -826,6 +883,484 @@ export class PanelAuthService {
       displayName: identity.displayName ?? identity.loginName,
       updatedAt: new Date().toISOString(),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // OAuth2 / IAM：resolve、pending、建号/绑号、资料覆盖
+  // ---------------------------------------------------------------------------
+
+  private requireOauth2(): RedirectOAuth2Provider {
+    const provider = this.providers.get('oauth2');
+    if (!provider || provider.kind !== 'redirect-oauth2') {
+      throw new PanelAuthError('AUTH_METHOD_DISABLED', 'OAuth2 authentication is disabled', 404);
+    }
+    return provider as RedirectOAuth2Provider;
+  }
+
+  /** 本次 identity 所属 Provider 的 Core auth_provider 域（woa / iam …）。 */
+  private authProviderDomainOf(identity: ExternalIdentity): string {
+    const provider = this.providers.get(identity.providerId);
+    if (!provider) {
+      throw new PanelAuthError(
+        'AUTH_PROVIDER_UNKNOWN',
+        `unknown auth provider: ${identity.providerId}`,
+        500,
+      );
+    }
+    return provider.authProviderDomain;
+  }
+
+  /** Hub username：非法字符换成 `_`（OAuth2 nickname / email local-part）。 */
+  private sanitizeHubUsername(raw: string): string {
+    const cleaned = raw
+      .trim()
+      .replace(/[^A-Za-z0-9_-]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return cleaned || 'user';
+  }
+
+  private hashUserKey(userKey: string): string {
+    return createHash('sha256').update(userKey, 'utf8').digest('hex');
+  }
+
+  /**
+   * OAuth2 callback 后认人：binding → verify；坏 key 则双查 + 新签（官方 WOA 坑的反面）。
+   * 命中后用实例 api_key 调 user/update 覆盖资料（失败只 warn）。
+   * 未命中 / key 上限 → 写 pending（mode=create_or_bind | bind_only）。
+   */
+  async resolveOauth2Login(input: {
+    instanceId: string;
+    identity: ExternalIdentity;
+    returnTo?: string;
+    requestId?: string;
+  }): Promise<ResolveOauth2LoginResult> {
+    this.requireOauth2();
+    const { instanceId, identity, requestId } = input;
+    this.requireInstance(instanceId);
+    const returnTo = this.safeReturnTo(input.returnTo || '/');
+
+    const tryAuthenticate = async (
+      coreUserId: string,
+      userKey: string,
+      user: SessionUser,
+    ): Promise<ResolveOauth2LoginResult> => {
+      await this.syncOauth2Profile(instanceId, coreUserId, identity, requestId);
+      const session = await this.sessions.create({
+        instanceId,
+        coreUserId,
+        userKey,
+        providerId: identity.providerId,
+        externalSubject: identity.subject,
+        displayName: identity.displayName ?? identity.loginName,
+        user,
+      });
+      return { kind: 'authenticated', session, identity };
+    };
+
+    // ① 本地 binding 命中
+    const existing = this.identities.find(instanceId, identity.providerId, identity.subject);
+    if (existing) {
+      let userKey: string | undefined;
+      try {
+        userKey = decryptSecret(existing.encryptedUserKey, this.config.sessionSecret);
+      } catch {
+        this.logger.warn('OAuth2 identity binding decrypt failed; treating as cache miss', {
+          instanceId, subject: identity.subject,
+        });
+      }
+      if (userKey) {
+        try {
+          const verified = await this.verifyCoreUser(instanceId, userKey, requestId);
+          return tryAuthenticate(existing.coreUserId, userKey, verified.user);
+        } catch (err) {
+          // 坏 key：不当成永久 401，落入双查 + 新签（与 WOA resolveIdentity 相反）。
+          this.logger.warn('OAuth2 binding key verify failed; falling back to find-by-external', {
+            instanceId,
+            coreUserId: existing.coreUserId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    // ② 双查 Core + 新签 key
+    const recovered = await this.resolveOauth2FromCore(instanceId, identity, requestId);
+    if (recovered?.kind === 'resolved') {
+      return tryAuthenticate(recovered.coreUserId, recovered.userKey, recovered.user);
+    }
+    if (recovered?.kind === 'bind_only') {
+      const pending = this.createOauth2Pending({
+        instanceId,
+        identity,
+        returnTo,
+        mode: 'bind_only',
+      });
+      return { kind: 'pending', pending };
+    }
+
+    // ③ 真·首次
+    const pending = this.createOauth2Pending({
+      instanceId,
+      identity,
+      returnTo,
+      mode: 'create_or_bind',
+    });
+    return { kind: 'pending', pending };
+  }
+
+  /**
+   * 双查 find-by-external；命中则新签 key 并回写 binding。
+   * 签不出（key 上限）→ bind_only；未命中 → null。
+   */
+  private async resolveOauth2FromCore(
+    instanceId: string,
+    identity: ExternalIdentity,
+    requestId?: string,
+  ): Promise<
+    | { kind: 'resolved'; coreUserId: string; userKey: string; user: SessionUser }
+    | { kind: 'bind_only'; coreUserId: string }
+    | null
+  > {
+    const externalId = this.externalAuthIdOf(identity);
+    if (!externalId) return null;
+    const entry = this.requireInstance(instanceId);
+    const context = this.context(entry, entry.api_key, requestId);
+    const authProviderDomain = this.authProviderDomainOf(identity);
+    const coreUserId = await this.lookupCoreUserByExternal(externalId, context, authProviderDomain);
+    if (!coreUserId) return null;
+
+    const issued = await this.metaKernel.invoke(
+      'user-key/create',
+      { user_id: coreUserId, name: 'oauth2-login' },
+      context,
+    );
+    if (issued?.code !== 0 || !issued.data || typeof issued.data !== 'object') {
+      this.logger.warn('OAuth2 key issue failed; pending mode=bind_only', {
+        instanceId, coreUserId, code: issued?.code, message: issued?.message,
+      });
+      return { kind: 'bind_only', coreUserId };
+    }
+    const userKey = (issued.data as { key_value?: unknown }).key_value;
+    if (typeof userKey !== 'string' || !userKey) {
+      throw new PanelAuthError('OAUTH2_KEY_ISSUE_INVALID', 'Core returned an invalid user_key', 502);
+    }
+    const verified = await this.verifyCoreUser(instanceId, userKey, requestId);
+    try {
+      this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
+    } catch (err) {
+      this.logger.warn('OAuth2 identity binding cache write failed (non-fatal)', {
+        instanceId, coreUserId, err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return { kind: 'resolved', coreUserId, userKey, user: verified.user };
+  }
+
+  /**
+   * 每次 SSO 命中已有用户后覆盖 username / email / display_name。
+   * 仅 AuthService → metaKernel（实例 api_key）；失败只 warn，不阻断登录。
+   */
+  private async syncOauth2Profile(
+    instanceId: string,
+    coreUserId: string,
+    identity: ExternalIdentity,
+    requestId?: string,
+  ): Promise<void> {
+    const entry = this.requireInstance(instanceId);
+    const context = this.context(entry, entry.api_key, requestId);
+    const username = this.sanitizeHubUsername(identity.loginName || identity.subject);
+    const body: Record<string, string> = { user_id: coreUserId, username };
+    if (identity.email?.trim()) body.email = identity.email.trim().toLowerCase();
+    if (identity.displayName?.trim()) body.display_name = identity.displayName.trim();
+    try {
+      const updated = await this.metaKernel.invoke('user/update', body, context);
+      if (updated?.code !== 0) {
+        this.logger.warn('OAuth2 profile sync user/update non-zero', {
+          instanceId, coreUserId, code: updated?.code, message: updated?.message,
+        });
+      }
+    } catch (err) {
+      this.logger.warn('OAuth2 profile sync user/update failed (non-fatal)', {
+        instanceId, coreUserId, err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  createOauth2Pending(input: {
+    instanceId: string;
+    identity: ExternalIdentity;
+    returnTo?: string;
+    mode: Oauth2PendingMode;
+  }): Oauth2PendingState {
+    this.requireOauth2();
+    this.requireInstance(input.instanceId);
+    const now = Date.now();
+    const pendingToken = randomUUID();
+    const state: Oauth2PendingState = {
+      pendingToken,
+      instanceId: input.instanceId,
+      providerId: input.identity.providerId,
+      externalSubject: input.identity.subject,
+      identity: input.identity,
+      returnTo: this.safeReturnTo(input.returnTo || '/'),
+      createdAt: now,
+      expiresAt: now + OAUTH2_PENDING_TTL_MS,
+      status: 'open',
+      mode: input.mode,
+    };
+    this.oauth2Pending.set(pendingToken, state);
+    return state;
+  }
+
+  getOauth2Pending(token: string | undefined): Oauth2PendingState | null {
+    if (!this.providers.get('oauth2')) return null;
+    if (!token) return null;
+    const state = this.oauth2Pending.get(token);
+    if (!state) return null;
+    if (state.expiresAt <= Date.now()) {
+      this.oauth2Pending.delete(token);
+      return null;
+    }
+    return state;
+  }
+
+  /** GET pending 展示视图。无效/过期 → PanelAuthError pending_expired。 */
+  getOauth2PendingView(token: string | undefined): Oauth2PendingView {
+    const pending = this.getOauth2Pending(token);
+    if (!pending || pending.status !== 'open') {
+      throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
+    }
+    return {
+      instance_id: pending.instanceId,
+      display_name: pending.identity.displayName,
+      login_name: pending.identity.loginName,
+      email: pending.identity.email,
+      mode: pending.mode,
+      expires_at: pending.expiresAt,
+    };
+  }
+
+  /**
+   * 原子占坑：open → consuming。第二次 → pending_consumed；过期 → pending_expired。
+   * 成功路径由调用方在建号/绑号完成后 `deleteOauth2Pending`。
+   */
+  consumeOauth2Pending(token: string): Oauth2PendingState {
+    const pending = this.getOauth2Pending(token);
+    if (!pending) {
+      throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
+    }
+    if (pending.status === 'consuming') {
+      throw new PanelAuthError('pending_consumed', 'OAuth2 login confirmation already in progress', 409);
+    }
+    pending.status = 'consuming';
+    return pending;
+  }
+
+  deleteOauth2Pending(token: string): void {
+    this.oauth2Pending.delete(token);
+  }
+
+  /** preview 续期 TTL 并写入 verifiedUserKeyHash（不占坑、不删除）。 */
+  private touchOauth2Pending(pending: Oauth2PendingState, verifiedUserKeyHash?: string): void {
+    pending.expiresAt = Date.now() + OAUTH2_PENDING_TTL_MS;
+    if (verifiedUserKeyHash) pending.verifiedUserKeyHash = verifiedUserKeyHash;
+  }
+
+  /**
+   * 绑老号安全检查（§7.2）：双查 identity 是否已绑其它账号；目标账号是否已有其它外部身份。
+   */
+  private async assertOauth2BindAllowed(input: {
+    instanceId: string;
+    identity: ExternalIdentity;
+    targetUserId: string;
+    requestId?: string;
+  }): Promise<void> {
+    const entry = this.requireInstance(input.instanceId);
+    const context = this.context(entry, entry.api_key, input.requestId);
+    const externalId = this.externalAuthIdOf(input.identity);
+    if (!externalId) {
+      throw new PanelAuthError('EXTERNAL_AUTH_ID_MISSING', 'OAuth2 identity missing email/subject', 400);
+    }
+    const boundUserId = await this.lookupCoreUserByExternal(
+      externalId,
+      context,
+      this.authProviderDomainOf(input.identity),
+    );
+    if (boundUserId && boundUserId !== input.targetUserId) {
+      throw new PanelAuthError(
+        'identity_already_bound',
+        'this company identity is already bound to another user',
+        409,
+      );
+    }
+
+    // 目标账号已有非占位 external_id 且 ≠ 当前 email → 禁止覆盖
+    const target = await this.metaKernel.invoke(
+      'user/get',
+      { user_id: input.targetUserId },
+      context,
+    );
+    if (target?.code === 0 && target.data && typeof target.data === 'object') {
+      const ext = (target.data as { external_id?: unknown }).external_id;
+      if (typeof ext === 'string' && ext && ext !== input.targetUserId && ext !== externalId) {
+        throw new PanelAuthError(
+          'target_already_bound_other_identity',
+          'target account is already bound to another external identity',
+          409,
+        );
+      }
+    }
+  }
+
+  /** 自动建号（pending mode 必须为 create_or_bind）。 */
+  async confirmOauth2Create(input: {
+    pendingToken: string;
+    requestId?: string;
+  }): Promise<{
+    session: IdpSession;
+    identity: ExternalIdentity;
+    userKeyDisplay: string;
+    redirectUrl: string;
+  }> {
+    const pending = this.consumeOauth2Pending(input.pendingToken);
+    try {
+      if (pending.mode === 'bind_only') {
+        throw new PanelAuthError(
+          'bind_only',
+          'automatic account creation is disabled; bind an existing user_key',
+          400,
+        );
+      }
+      const resolved = await this.provisionIdentity({
+        instanceId: pending.instanceId,
+        identity: pending.identity,
+        requestId: input.requestId,
+      });
+      await this.syncOauth2Profile(
+        pending.instanceId,
+        resolved.coreUserId,
+        pending.identity,
+        input.requestId,
+      );
+      const session = await this.sessions.create({
+        instanceId: pending.instanceId,
+        coreUserId: resolved.coreUserId,
+        userKey: resolved.userKey,
+        providerId: pending.identity.providerId,
+        externalSubject: pending.identity.subject,
+        displayName: pending.identity.displayName ?? pending.identity.loginName,
+        user: resolved.user,
+      });
+      this.deleteOauth2Pending(input.pendingToken);
+      return {
+        session,
+        identity: pending.identity,
+        userKeyDisplay: resolved.userKey,
+        redirectUrl: '/',
+      };
+    } catch (err) {
+      // MVP：无论 create 成败，消费后删除 pending，防重放再建号。
+      this.deleteOauth2Pending(input.pendingToken);
+      throw err;
+    }
+  }
+
+  /** 绑老号预览：不消费 pending；写 verifiedUserKeyHash 并续期。 */
+  async previewOauth2Bind(input: {
+    pendingToken: string;
+    userKey: string;
+    requestId?: string;
+  }): Promise<{ userId: string; username?: string; email?: string }> {
+    const pending = this.getOauth2Pending(input.pendingToken);
+    if (!pending || pending.status !== 'open') {
+      throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
+    }
+    const key = assertUsableUserKey(input.userKey);
+    const entry = this.requireInstance(pending.instanceId);
+    const verified = await this.metaKernel.invoke(
+      'auth/verify',
+      { user_key: key },
+      this.context(entry, key, input.requestId),
+    );
+    const data = verified?.data as { valid?: boolean } | null;
+    if (verified?.code !== 0 || data?.valid !== true) {
+      throw new PanelAuthError('invalid_key', 'user_key verification failed', 400);
+    }
+    const { user_id, user } = this.readVerifiedUser(verified);
+    await this.assertOauth2BindAllowed({
+      instanceId: pending.instanceId,
+      identity: pending.identity,
+      targetUserId: user_id,
+      requestId: input.requestId,
+    });
+    this.touchOauth2Pending(pending, this.hashUserKey(key));
+    return {
+      userId: user_id,
+      username: user.username,
+      email: user.email,
+    };
+  }
+
+  /** 绑老号确认：校验 preview hash → 占坑 → bind → session → 删 pending。 */
+  async confirmOauth2Bind(input: {
+    pendingToken: string;
+    userKey: string;
+    requestId?: string;
+  }): Promise<{
+    session: IdpSession;
+    identity: ExternalIdentity;
+    redirectUrl: string;
+  }> {
+    const peek = this.getOauth2Pending(input.pendingToken);
+    if (!peek || peek.status !== 'open') {
+      throw new PanelAuthError('pending_expired', 'OAuth2 login confirmation expired', 400);
+    }
+    const key = assertUsableUserKey(input.userKey);
+    if (!peek.verifiedUserKeyHash) {
+      throw new PanelAuthError('preview_not_completed', 'preview bind before confirm', 400);
+    }
+    if (peek.verifiedUserKeyHash !== this.hashUserKey(key)) {
+      throw new PanelAuthError('invalid_key', 'user_key does not match preview', 400);
+    }
+
+    const pending = this.consumeOauth2Pending(input.pendingToken);
+    try {
+      const entry = this.requireInstance(pending.instanceId);
+      const verified = await this.metaKernel.invoke(
+        'auth/verify',
+        { user_key: key },
+        this.context(entry, key, input.requestId),
+      );
+      const data = verified?.data as { valid?: boolean } | null;
+      if (verified?.code !== 0 || data?.valid !== true) {
+        throw new PanelAuthError('invalid_key', 'user_key verification failed', 400);
+      }
+      const { user_id, user } = this.readVerifiedUser(verified);
+      await this.assertOauth2BindAllowed({
+        instanceId: pending.instanceId,
+        identity: pending.identity,
+        targetUserId: user_id,
+        requestId: input.requestId,
+      });
+      const adminCtx = this.context(entry, entry.api_key, input.requestId);
+      await this.bindExternalAuth(user_id, pending.identity, adminCtx);
+      this.saveIdentityBinding(pending.instanceId, pending.identity, user_id, key);
+      await this.syncOauth2Profile(pending.instanceId, user_id, pending.identity, input.requestId);
+      const session = await this.sessions.create({
+        instanceId: pending.instanceId,
+        coreUserId: user_id,
+        userKey: key,
+        providerId: pending.identity.providerId,
+        externalSubject: pending.identity.subject,
+        displayName: pending.identity.displayName ?? pending.identity.loginName,
+        user,
+      });
+      this.deleteOauth2Pending(input.pendingToken);
+      return { session, identity: pending.identity, redirectUrl: '/' };
+    } catch (err) {
+      this.deleteOauth2Pending(input.pendingToken);
+      throw err;
+    }
   }
 
   private requireWoa(): HeaderInjectedProvider {
