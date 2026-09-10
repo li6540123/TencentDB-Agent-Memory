@@ -40,6 +40,33 @@ Hub 容器环境变量（见 `.env.company.example`）：
 
 Panel 填 `http://...` 仓库地址即可；token 不落盘。
 
+## Hub Panel 公司 IAM（OAuth2 SSO）
+
+默认仅 `user_key`（`.admin-key` 登录）。要开 IAM SSO，在测试机 `.env` 填写（**只写机器 `.env`，勿提交 git**）：
+
+| 变量 | 必填（`PANEL_AUTH_MODE` 含 `oauth2` 时） |
+|------|------|
+| `PANEL_AUTH_MODE` | `user_key,oauth2`（建议始终保留 `user_key`） |
+| `PANEL_AUTH_OAUTH2_CLIENT_ID` | 是 |
+| `PANEL_AUTH_OAUTH2_CLIENT_SECRET` | 是 |
+| `PANEL_AUTH_OAUTH2_AUTHORIZATION_URL` | 是 |
+| `PANEL_AUTH_OAUTH2_TOKEN_URL` | 是 |
+| `PANEL_AUTH_OAUTH2_USERINFO_URL` | 是 |
+| `PANEL_AUTH_OAUTH2_APP_URL` | 是（Hub 对外根，如 `http://<PUBLIC_HOST>:8125`） |
+| `METADATA_EXTERNAL_AUTH_PROVIDER` | 建议 `iam` |
+
+占位见 `.env.company.example` 末尾（值为空，填真值后再 `./up.sh`）。
+
+**redirect_uri：** 向架构部登记，须与 Hub 实际回调完全一致。默认：
+
+```text
+{PANEL_AUTH_OAUTH2_APP_URL 去尾斜杠}/api/v1/auth/idp/oauth2/callback
+```
+
+例：`http://<PUBLIC_HOST>:8125/api/v1/auth/idp/oauth2/callback`。网关剥端口或 https 终结时，用 `PANEL_AUTH_OAUTH2_REDIRECT_URI` 覆盖拼出的值。
+
+**会话存储：** 单机内网默认进程内内存会话，**不必**另配 `PANEL_SESSION_STORE=redis`（compose 里的 Redis 仍给 Proxy 会话用，与 IAM 登录无关）。Hub 容器重启后会话需重新 SSO。
+
 ## 记忆向量 embedding（Qwen3）
 
 `.env` 打开 `MEMORY_EMBEDDING_ENABLED=true` 并配置 URL/Key/Model；**必须** `MEMORY_EMBEDDING_SEND_DIMENSIONS=false`。  

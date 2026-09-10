@@ -63,6 +63,7 @@ cp .env.example .env
 # 编辑 .env：两组 LLM、REDIS_PASSWORD、PUBLIC_HOST
 # 可选：MEMORY_EMBEDDING_*（Qwen3 须 SEND_DIMENSIONS=false）
 # 可选：KNOWLEDGE_*（内网 http Git CodeGraph）
+# 可选：PANEL_AUTH_*（公司 IAM OAuth2 SSO，见 DEPLOY.md）
 chmod +x up.sh down.sh backup.sh restore.sh build-local.sh export-images.sh load-images.sh
 ./up.sh --render-only          # 可选：先看 runtime/*.yaml
 ./up.sh
