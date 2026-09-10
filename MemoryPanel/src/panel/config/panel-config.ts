@@ -246,7 +246,9 @@ function buildAuthConfig(): PanelAuthConfig {
     assertOAuth2Config(oauth2);
   }
 
-  const sessionSecureFallback = (oauth2AppUrl || appUrl).startsWith('https://');
+  // OAuth2 APP_URL 仅在 oauth2 模式启用时参与 Secure 推断；仅 WOA 时忽略残留的 OAUTH2_APP_URL。
+  const sessionSecureAppUrl = oauth2Enabled ? (oauth2AppUrl || appUrl) : appUrl;
+  const sessionSecureFallback = sessionSecureAppUrl.startsWith('https://');
 
   return {
     userKeyEnabled,

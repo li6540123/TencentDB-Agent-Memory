@@ -64,6 +64,22 @@ describe('panel-config oauth2', () => {
     expect(auth.sessionSecure).toBe(false);
   });
 
+  it('ignores leftover oauth2 app url for sessionSecure when only woa is enabled', async () => {
+    clearPanelAuthEnv();
+    tempDir = mkdtempSync(join(tmpdir(), 'panel-auth-oauth2-'));
+    process.env.PANEL_AUTH_MODE = 'user_key,woa';
+    process.env.PANEL_AUTH_IDENTITY_STORE_PATH = join(tempDir, 'identities.json');
+    process.env.PANEL_AUTH_SESSION_SECRET_FILE = join(tempDir, 'session-secret');
+    process.env.PANEL_AUTH_WOA_APP_URL = 'https://hub.example';
+    process.env.PANEL_AUTH_OAUTH2_APP_URL = 'http://leftover-oauth2.example';
+
+    const auth = await loadAuthConfig();
+
+    expect(auth.woa.enabled).toBe(true);
+    expect(auth.oauth2.enabled).toBe(false);
+    expect(auth.sessionSecure).toBe(true);
+  });
+
   it('uses oauth2 app url for sessionSecure when woa is disabled', async () => {
     clearPanelAuthEnv();
     tempDir = mkdtempSync(join(tmpdir(), 'panel-auth-oauth2-'));
