@@ -51,6 +51,8 @@ http://<PUBLIC_HOST>:8096/openclaw/default
 
 知识库 / Skill 不能跟着留空：Proxy 在 `knowledge.serviceToken` 为空时**根本不注册**知识库 injector；Hub 的 `REMOTE_INSTANCE_KEY` 为空则容器起不来。因此 `.env` 里用 `PROXY_CORE_SERVICE_TOKEN=local` 给 Hub 和 Proxy 当占位 Bearer，**不要**把它写进 `MEMORY_CORE_GATEWAY_API_KEY`。
 
+**IAM SSO 自动建号：** Core 门禁关着时，Proxy 的 `apiKey`/空门禁与 `serviceToken` 占位即可；Hub 实例 `api_key`（`metadata-instances.json` / 单实例 `REMOTE_INSTANCE_KEY`）**必须是该套 Core 的 admin `sk-mem`（`.admin-key`）**，不能填 `local`。详见 [DEPLOY.md §多实例 + 鉴权约定](./DEPLOY.md) 与 [UPGRADE-iam-sso-2418d1a4.md](./UPGRADE-iam-sso-2418d1a4.md)。
+
 ## 第一台机器
 
 需要：Docker Compose v2、Python 3、能拉镜像（或 `./load-images.sh` 导入离线包）。

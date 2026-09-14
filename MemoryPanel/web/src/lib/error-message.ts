@@ -32,6 +32,12 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'USER_CREATE_FAILED',
   // 吊销最后一把 active sk-mem：内核硬拦截，须友好文案，勿直接甩英文码。
   'LAST_KEY_CANNOT_REVOKE',
+  // IAM SSO 绑已有 key / pending（后端 message 常为 snake_case 错误码）
+  'INVALID_KEY',
+  'IDENTITY_ALREADY_BOUND',
+  'TARGET_ALREADY_BOUND_OTHER_IDENTITY',
+  'PENDING_EXPIRED',
+  'PREVIEW_NOT_COMPLETED',
 ]);
 
 /**
@@ -77,6 +83,8 @@ function getPriorityPatterns(): Array<[RegExp, string]> {
     [/visibility[_\s-]?restricted/i, i18n.t('error.ASSET_PRIVATE_INACCESSIBLE')],
     [/asset_not_bindable/i, i18n.t('error.ASSET_NOT_BINDABLE')],
     [/last_key_cannot_revoke/i, i18n.t('error.LAST_KEY_CANNOT_REVOKE')],
+    [/identity_already_bound/i, i18n.t('error.IDENTITY_ALREADY_BOUND')],
+    [/target_already_bound_other_identity/i, i18n.t('error.TARGET_ALREADY_BOUND_OTHER_IDENTITY')],
   ];
 }
 

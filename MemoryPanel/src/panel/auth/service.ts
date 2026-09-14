@@ -74,16 +74,13 @@ const OAUTH2_STATE_TTL_MS = OAUTH2_EPHEMERAL_TTL_MS;
 /**
  * 用户自填 user_key 的格式约束。
  *
- * 本端点允许"key 不存在即建号"（首次登录即注册），是**无凭据**的公开入口，
- * 因此即便不设开关，也必须挡住三类输入，否则等于开放一个可任意写库的口子：
- * - 过短（含空串）：任何人随手敲几个字符就能批量建号；
+ * 长度与 Core 对齐：非空即可（Core zod `min(1)`），不做最短 8 位。
+ * 仍拦住：
  * - 过长：超长串会打爆存储 / 日志；
  * - 含控制字符 / 空白：换行会污染日志（CRLF 注入），空格会造成"看起来一样的两把 key"。
  *
- * 只做长度与字符集约束，不校验 `sk-mem-` 前缀——用户自己的 key 可能来自任意体系
- * （如 CodeBuddy 下发的 key），强制前缀会直接否定"兼容用户自持 key"这个目标。
+ * 不校验 `sk-mem-` 前缀——允许自定义 key。
  */
-const USER_KEY_MIN_LENGTH = 8;
 const USER_KEY_MAX_LENGTH = 256;
 // 用 Unicode 属性类 \p{Cc} 表达"控制字符"，而不是在正则里写 \x00-\x1f 这类
 // 控制字符转义（会触发 no-control-regex）；覆盖面也更全（含 U+0080–U+009F）。
@@ -93,13 +90,6 @@ function assertUsableUserKey(key: string): string {
   const trimmed = key.trim();
   if (!trimmed) {
     throw new PanelAuthError('INVALID_USER_KEY', 'user_key must not be empty', 400);
-  }
-  if (trimmed.length < USER_KEY_MIN_LENGTH) {
-    throw new PanelAuthError(
-      'INVALID_USER_KEY',
-      `user_key must be at least ${USER_KEY_MIN_LENGTH} characters`,
-      400,
-    );
   }
   if (trimmed.length > USER_KEY_MAX_LENGTH) {
     throw new PanelAuthError(
@@ -807,9 +797,6 @@ export class PanelAuthService {
     if (!/^[A-Za-z0-9_-]+$/.test(username)) {
       throw new PanelAuthError('INVALID_USERNAME', 'username must contain only letters, numbers, underscores, or hyphens', 400);
     }
-    if (customUserKey !== undefined && customUserKey.length < 8) {
-      throw new PanelAuthError('INVALID_CUSTOM_USER_KEY', 'custom user_key is too short', 400);
-    }
     // 建号要求 system_admin：user/create(-with-key) 的 assertCanManageUsers 不再有
     // "无 user-key 白名单"分支，必须带 admin user_key。
     // 单一凭证来源（见 §12.3）：统一用实例 api_key，不再另设 admin key 配置项。
@@ -1045,16 +1032,24 @@ export class PanelAuthService {
     const tryAuthenticate = async (
       coreUserId: string,
       userKey: string,
-      user: SessionUser,
+      _user: SessionUser,
     ): Promise<ResolveOauth2LoginResult> => {
-      await this.syncOauth2Profile(instanceId, coreUserId, identity, requestId);
+      // sync 会覆盖 Core username/email/display_name；会话必须再用 verify 拉最新 user，
+      // 否则绑老号后成员列表（Core）与个人资料（session 快照）会不一致。
+      const user = await this.syncOauth2ProfileAndLoadUser(
+        instanceId,
+        coreUserId,
+        identity,
+        userKey,
+        requestId,
+      );
       const session = await this.sessions.create({
         instanceId,
         coreUserId,
         userKey,
         providerId: identity.providerId,
         externalSubject: identity.subject,
-        displayName: identity.displayName ?? identity.loginName,
+        displayName: user.display_name || user.username || identity.displayName || identity.loginName,
         user,
       });
       return { kind: 'authenticated', session, identity };
@@ -1186,6 +1181,18 @@ export class PanelAuthService {
         instanceId, coreUserId, err: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /** sync 资料后再 verify，保证 Cookie 会话里的 user 与 Core 一致。 */
+  private async syncOauth2ProfileAndLoadUser(
+    instanceId: string,
+    coreUserId: string,
+    identity: ExternalIdentity,
+    userKey: string,
+    requestId?: string,
+  ): Promise<SessionUser> {
+    await this.syncOauth2Profile(instanceId, coreUserId, identity, requestId);
+    return (await this.verifyCoreUser(instanceId, userKey, requestId)).user;
   }
 
   async createOauth2Pending(input: {
@@ -1338,10 +1345,11 @@ export class PanelAuthService {
         identity: pending.identity,
         requestId: input.requestId,
       });
-      await this.syncOauth2Profile(
+      const user = await this.syncOauth2ProfileAndLoadUser(
         pending.instanceId,
         resolved.coreUserId,
         pending.identity,
+        resolved.userKey,
         input.requestId,
       );
       const session = await this.sessions.create({
@@ -1350,8 +1358,8 @@ export class PanelAuthService {
         userKey: resolved.userKey,
         providerId: pending.identity.providerId,
         externalSubject: pending.identity.subject,
-        displayName: pending.identity.displayName ?? pending.identity.loginName,
-        user: resolved.user,
+        displayName: user.display_name || user.username || pending.identity.displayName || pending.identity.loginName,
+        user,
       });
       await this.deleteOauth2Pending(input.pendingToken);
       return {
@@ -1437,7 +1445,7 @@ export class PanelAuthService {
       if (verified?.code !== 0 || data?.valid !== true) {
         throw new PanelAuthError('invalid_key', 'user_key verification failed', 400);
       }
-      const { user_id, user } = this.readVerifiedUser(verified);
+      const { user_id } = this.readVerifiedUser(verified);
       await this.assertOauth2BindAllowed({
         instanceId: pending.instanceId,
         identity: pending.identity,
@@ -1447,14 +1455,20 @@ export class PanelAuthService {
       const adminCtx = this.context(entry, entry.api_key, input.requestId);
       await this.bindExternalAuth(user_id, pending.identity, adminCtx);
       await this.saveIdentityBinding(pending.instanceId, pending.identity, user_id, key);
-      await this.syncOauth2Profile(pending.instanceId, user_id, pending.identity, input.requestId);
+      const user = await this.syncOauth2ProfileAndLoadUser(
+        pending.instanceId,
+        user_id,
+        pending.identity,
+        key,
+        input.requestId,
+      );
       const session = await this.sessions.create({
         instanceId: pending.instanceId,
         coreUserId: user_id,
         userKey: key,
         providerId: pending.identity.providerId,
         externalSubject: pending.identity.subject,
-        displayName: pending.identity.displayName ?? pending.identity.loginName,
+        displayName: user.display_name || user.username || pending.identity.displayName || pending.identity.loginName,
         user,
       });
       await this.deleteOauth2Pending(input.pendingToken);

@@ -79,6 +79,31 @@ PANEL_REDIS_KEY_PREFIX=panel:
 
 本机查看 Redis：`127.0.0.1:6379`，key 前缀 `panel:` 为 Hub 会话；`inj:` 等为 Proxy。
 
+### 多实例 + 鉴权约定（SSO 自动建号）
+
+公司常见拓扑：**一个 Hub，多套 Core+Proxy（每套一个 instance）**。登录页先选 instance，再点「公司IAM登录」；Hub 只向**选中那套** Core 建号/绑号。
+
+Core 有两层鉴权，别混：
+
+| 层 | 头 | 作用 |
+|----|----|------|
+| 网关门禁 | `Authorization: Bearer …` | 服务间共享密钥；**未配置 gateway key 时关闭** |
+| 用户身份 | `x-tdai-user-key: …` | 认具体用户；`/v3/meta/user/create` 等要求 **system_admin** |
+
+**本仓库 internal-team / 当前公司部署约定：Core 网关门禁关闭**（`MEMORY_CORE_GATEWAY_API_KEY` 留空）。原因见 [README](./README.md)：Proxy 的 `auth/verify` 不带 Bearer，开了门禁会话初始化易失败。
+
+在此前提下：
+
+| 配置 | 怎么填 |
+|------|--------|
+| Proxy `tdai.apiKey`（`MEMORY_CORE_GATEWAY_API_KEY`） | **保持空**；空时回落 `local-proxy`，门禁关着一般无影响 |
+| Proxy `skill` / `knowledge` 的 `serviceToken`（`PROXY_CORE_SERVICE_TOKEN`） | **须非空**（常用占位 `local`），否则知识库 injector 不注册；门禁关着时**不真校验**内容。这是 Proxy→Core 调 Skill/知识库时带的 Bearer，**不是**员工 `sk-mem` |
+| Hub 实例 `api_key`（`metadata-instances.json` 或单实例时的 `REMOTE_INSTANCE_KEY`） | **必须是该套 Core 的 admin `sk-mem`（如 `.admin-key`）**。SSO 自动建号时 Hub 把它同时塞进 Bearer 与 `x-tdai-user-key`；门禁关着时 Bearer 无所谓，**真正起作用的是当 admin user-key**。多套 Core → 每个 instance 各配自己的 admin key |
+
+员工日常登录 Hub / 调业务接口用自己的 `sk-mem`；admin key 只给 Hub 服务端做建号、`find-by-external`、`bind-external`、资料回写等管理动作。
+
+> 若将来打开 Core 网关门禁：Proxy 侧 Bearer（`tdai.apiKey` / `serviceToken`）须与 Core gateway 密钥一致；Hub 当前只有一个 `api_key` 字段却要兼做「网关密钥 + admin user-key」，两值不同时会冲突——开大门禁前需单独评估改造，**不要在未改代码时直接开**。
+
 ## 记忆向量 embedding（Qwen3）
 
 `.env` 打开 `MEMORY_EMBEDDING_ENABLED=true` 并配置 URL/Key/Model；**必须** `MEMORY_EMBEDDING_SEND_DIMENSIONS=false`。  

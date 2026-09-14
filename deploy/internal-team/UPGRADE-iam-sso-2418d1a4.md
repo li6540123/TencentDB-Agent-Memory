@@ -189,24 +189,48 @@ Redis 会话（若开了）：IAM 登录一次后，`docker restart tdai-memory-
 
 ---
 
-## 6. 常见问题
+## 6. 多实例与鉴权（必读）
+
+拓扑：**一个 Hub + 多套 Core/Proxy（每套一个 instance）**。登录先选 instance，再点公司 IAM；建号打在选中那套 Core 上。
+
+Core 两层鉴权：
+
+- **网关门禁**（`Authorization: Bearer`）：未配 gateway key 时关闭  
+- **用户身份**（`x-tdai-user-key`）：`user/create` 等需要 **system_admin**
+
+**当前约定：Core 门禁关闭**（`MEMORY_CORE_GATEWAY_API_KEY` 留空）。
+
+| 项 | 填法 |
+|----|------|
+| Proxy `tdai.apiKey` / `MEMORY_CORE_GATEWAY_API_KEY` | **空着**即可 |
+| Proxy `serviceToken` / `PROXY_CORE_SERVICE_TOKEN` | **非空占位**（如 `local`）；门禁关着不真校验。用于 Proxy→Core 调 Skill/知识库的 Bearer，不是员工 key |
+| Hub `metadata-instances.json` 的 `api_key`（或 `REMOTE_INSTANCE_KEY`） | **该套 Core 的 admin `sk-mem`（`.admin-key`）**；SSO 建号靠它当 `x-tdai-user-key`。多套 Core 各配各的 |
+
+不要把 Proxy 的 `local` 占位当成 Hub 实例 `api_key`——SSO 自动建号会 401。
+
+---
+
+## 7. 常见问题
 
 | 现象 | 排查 |
 |------|------|
 | 没有 SSO 按钮 | `.env` 未开 `oauth2`；或 compose 未透传 → `printenv PANEL_AUTH_MODE` 为空 |
 | 按钮有，回调失败 | `REDIRECT_URI` 与白名单不一致；`APP_URL` 写成了内网别名/错端口 |
 | Hub 起不来 | `PANEL_AUTH_MODE` 含 `oauth2` 但缺 client/URL/`APP_URL`；看 Hub 日志 |
+| SSO 建号 401/403 | Hub 实例 `api_key` 不是该 Core 的 admin sk-mem（误写成 `local` / 服务占位符） |
 | 重启就掉登录 | 未设 `PANEL_SESSION_STORE=redis`，或 Hub 连不上 `redis:6379` |
 | 只换了镜像、旧 compose | 必须按第 3 节补 environment，否则新功能等于没开 |
 
 ---
 
-## 7. 变更清单（给实施同事勾）
+## 8. 变更清单（给实施同事勾）
 
 - [ ] `docker load` 三件套 `iam-sso-2418d1a4-amd64`
 - [ ] `.env` 三个 `*_IMAGE` tag
 - [ ] `.env` IAM 变量 + 正确的对外 `APP_URL` / `REDIRECT_URI`
 - [ ] （建议）`.env` Redis 会话变量
 - [ ] 旧 `docker-compose.yml`：`memory-hub` 追加 environment + `depends_on redis`
+- [ ] Hub 每个 instance 的 `api_key` = 对应 Core 的 admin sk-mem（不是 `local`）
+- [ ] `MEMORY_CORE_GATEWAY_API_KEY` 仍为空；`PROXY_CORE_SERVICE_TOKEN` 非空占位
 - [ ] 架构部白名单已是公司机那条 callback
 - [ ] `./up.sh` 后 `/api/v1/auth/methods` 含 oauth2，登录页有按钮

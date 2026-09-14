@@ -2,6 +2,7 @@ allowBuilds:
   '@google/genai': set this to true or false
   es5-ext: set this to true or false
   esbuild: set this to true or false
+  koffi: set this to true or false
   mongodb-memory-server: set this to true or false
   node-llama-cpp: set this to true or false
   openclaw: set this to true or false
